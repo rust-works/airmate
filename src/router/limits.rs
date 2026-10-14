@@ -47,15 +47,19 @@ impl Bucket {
     ///
     /// The wait until `n` tokens (or a full bucket, for an oversized request) are available.
     pub fn try_take(&mut self, n: f64, now: Duration) -> Result<(), Duration> {
+        // A bucket that never refills (a zero limit) would wait for ever: say an hour.
+        const NEVER: Duration = Duration::from_secs(3600);
+        if self.capacity <= 0.0 || self.per_sec <= 0.0 {
+            return Err(NEVER);
+        }
         self.refill(now);
         let need = n.min(self.capacity);
         if self.tokens >= need {
             self.tokens -= n;
             Ok(())
         } else {
-            Err(Duration::from_secs_f64(
-                ((need - self.tokens) / self.per_sec).max(0.0),
-            ))
+            let secs = ((need - self.tokens) / self.per_sec).max(0.0);
+            Err(Duration::try_from_secs_f64(secs).unwrap_or(NEVER))
         }
     }
 
@@ -266,6 +270,28 @@ mod tests {
         assert!(b.try_take(1.0, s(1)).is_ok());
         assert_eq!(b.try_take(5.0, s(1)).unwrap_err(), s(5));
         assert!(b.try_take(5.0, s(6)).is_ok());
+    }
+
+    #[test]
+    fn a_zero_limit_refuses_for_ever_without_panicking() {
+        // Found in review: a zero-capacity bucket divided by a zero refill rate.
+        let mut b = Bucket::new(0.0, Duration::ZERO);
+        for t in 0..5 {
+            assert_eq!(
+                b.try_take(1.0, Duration::from_secs(t)),
+                Err(Duration::from_secs(3600))
+            );
+        }
+        let limiter = Limiter::new(
+            RateLimit {
+                rpm: Some(0),
+                tpm: Some(0),
+            },
+            Duration::ZERO,
+        );
+        for _ in 0..3 {
+            assert!(limiter.admit(0, Duration::ZERO).is_err());
+        }
     }
 
     #[test]

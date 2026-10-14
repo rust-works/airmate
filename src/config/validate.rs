@@ -444,6 +444,20 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
                 "client names must be unique and use only letters, digits, `_`, `-` and `.`",
             ));
         }
+        if cl.name == "default" || cl.name == "-" {
+            out.push(ConfigError::new(
+                &p,
+                "`default` and `-` are reserved: they name the gateway token and refused requests",
+            ));
+        }
+        if let Some(r) = &cl.rate {
+            if r.rpm == Some(0) || r.tpm == Some(0) {
+                out.push(ConfigError::new(
+                    format!("{p}.rate"),
+                    "limits must be at least 1; leave a limit out to leave it unlimited",
+                ));
+            }
+        }
         if !valid_key_hash(&cl.key_hash) {
             out.push(ConfigError::new(
                 format!("{p}.key_hash"),
@@ -676,6 +690,41 @@ mod tests {
         c.upstreams[0].protocol = ProtocolName::Gemini;
         c.upstreams[0].flavor = FlavorName::Fireworks;
         assert!(has(&c, "flavors apply"));
+    }
+
+    #[test]
+    fn client_limits_cannot_be_zero_and_two_names_are_reserved() {
+        let client = |name: &str| ClientConfig {
+            name: name.into(),
+            key_hash: format!("sha256:{}", "a".repeat(64)),
+            models: vec![],
+            rate: None,
+            budget: None,
+            budget_fallback: None,
+        };
+        let mut c = good();
+        c.clients.push(client("ci"));
+        assert!(problems(&c).is_empty(), "{:?}", problems(&c));
+        c.clients[0].rate = Some(RateLimit {
+            rpm: Some(0),
+            tpm: None,
+        });
+        assert!(has(&c, "limits must be at least 1"));
+        c.clients[0].rate = Some(RateLimit {
+            rpm: None,
+            tpm: Some(0),
+        });
+        assert!(has(&c, "limits must be at least 1"));
+        c.clients[0].rate = Some(RateLimit {
+            rpm: Some(1),
+            tpm: Some(1),
+        });
+        assert!(problems(&c).is_empty());
+        for reserved in ["default", "-"] {
+            let mut c = good();
+            c.clients.push(client(reserved));
+            assert!(has(&c, "reserved"), "{reserved}");
+        }
     }
 
     #[test]
