@@ -355,6 +355,10 @@ impl BoundGateway {
 
     /// Accepts connections until `shutdown` is set.
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) {
+        tokio::spawn(crate::router::health::run(
+            self.shared.clone(),
+            shutdown.clone(),
+        ));
         let mut backoff = Duration::from_millis(5);
         loop {
             tokio::select! {

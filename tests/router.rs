@@ -717,3 +717,66 @@ async fn attempts_and_skips_are_logged() {
         (2, 200, Some("b/m"))
     );
 }
+
+#[tokio::test]
+async fn an_upstream_that_fails_its_health_check_is_skipped_until_it_recovers() {
+    let up = Arc::new(AtomicUsize::new(0));
+    let flag = up.clone();
+    let probed = Arc::new(AtomicUsize::new(0));
+    let probes = probed.clone();
+    let local = Mock::start(move |r| {
+        if r.path == "/api/tags" {
+            probes.fetch_add(1, Ordering::SeqCst);
+            if flag.load(Ordering::SeqCst) == 0 {
+                Reply::json(503, json!({}))
+            } else {
+                Reply::json(200, json!({"models": []}))
+            }
+        } else {
+            Reply::json(200, chat_ok("local"))
+        }
+    })
+    .await;
+    let remote = Mock::start(|_| Reply::json(200, chat_ok("remote"))).await;
+    let mut y = config(
+        &[("local", &local.url()), ("remote", &remote.url())],
+        "",
+        "",
+    );
+    y = y.replacen(
+        "    api_key: { env: UP_KEY }\n",
+        "    api_key: { env: UP_KEY }\n    health_check: { path: /api/tags, interval_secs: 1 }\n",
+        1,
+    );
+    let g = gw(&y).await;
+    // Wait for the first probe to mark it unhealthy.
+    for _ in 0..40 {
+        if g.shared.router.upstream_health("local").is_unhealthy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(g.shared.router.upstream_health("local").is_unhealthy());
+    let r = g.post("/v1/messages", &request()).await;
+    assert_eq!(r.header("x-airmate-upstream"), Some("remote"));
+    assert_eq!(r.header("x-airmate-skipped"), Some("local/m:unhealthy"));
+    // The server recovers; the next probe marks it healthy and it leads again.
+    up.store(1, Ordering::SeqCst);
+    for _ in 0..40 {
+        if !g.shared.router.upstream_health("local").is_unhealthy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let r = g.post("/v1/messages", &request()).await;
+    assert_eq!(
+        r.header("x-airmate-upstream"),
+        Some("local"),
+        "{:?}",
+        r.headers
+    );
+    assert!(
+        probed.load(Ordering::SeqCst) >= 2,
+        "the upstream is probed repeatedly"
+    );
+}

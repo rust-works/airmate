@@ -7,6 +7,7 @@ pub mod classifier;
 pub mod clock;
 pub mod engine;
 pub mod glob;
+pub mod health;
 pub mod rules;
 pub mod state;
 pub mod strategy;
