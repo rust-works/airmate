@@ -34,6 +34,7 @@ use super::upstream::{retry_after, send};
 use super::{acquire, error_response, full, read_body, GwBody, Route};
 use crate::router::catalog::{Skip, SkipReason};
 use crate::router::engine::{exhausted, plan, PlanInput, Planned};
+use crate::router::glob::glob_match;
 use crate::router::RouteTarget;
 
 /// Seconds since the Unix epoch.
@@ -501,6 +502,46 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     route.rec.rule(planned.rule.as_deref());
     let mut skipped = planned.skipped.clone();
 
+    // Per-client controls: which models it may use, and how fast.
+    let client_cfg = route.tables.clients.get(&route.identity.client);
+    if let Some(c) = client_cfg {
+        if !c.models.is_empty()
+            && !c
+                .models
+                .iter()
+                .any(|g| glob_match(g, &facts.model) || glob_match(g, &planned.entry_name))
+        {
+            return fail(
+                &route,
+                GatewayError::new(
+                    ErrorKind::Permission,
+                    format!(
+                        "client `{}` may not use the model `{}`",
+                        c.name, facts.model
+                    ),
+                ),
+            );
+        }
+    }
+    let client_limiter =
+        client_cfg.and_then(|c| c.rate.map(|rate| route.shared.limits.client(&c.name, rate)));
+    if let Some(l) = &client_limiter {
+        if let Err(d) = l.admit(facts.est_input_tokens, route.shared.router.clock.now()) {
+            return fail(
+                &route,
+                GatewayError::new(
+                    ErrorKind::RateLimit,
+                    format!(
+                        "client `{}` exceeded its limit of {}",
+                        route.identity.client,
+                        d.which.describe()
+                    ),
+                )
+                .with_retry_after(Some(d.retry_after.as_secs() + 1)),
+            );
+        }
+    }
+
     let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
     let permit = match acquire(&route.shared, queue).await {
         Ok(p) => p,
@@ -550,6 +591,19 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
             planned: planned_target,
             armed: matches!(admit, crate::router::breaker::Admit::Probe),
         };
+        if let Some(rate) = target.upstream.rate {
+            let limiter = route.shared.limits.upstream(&target.upstream.name, rate);
+            if limiter
+                .admit(facts.est_input_tokens, state.clock.now())
+                .is_err()
+            {
+                skipped.push(Skip {
+                    target: label,
+                    reason: SkipReason::RateLimit,
+                });
+                continue;
+            }
+        }
         let slot: Option<OwnedSemaphorePermit> = match &target.upstream.slots {
             Some(s) => match s.clone().try_acquire_owned() {
                 Ok(p) => Some(p),
@@ -626,6 +680,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                         headers,
                         permit,
                         slot,
+                        client_limiter,
                     )
                     .await;
                 }
@@ -730,9 +785,19 @@ async fn finish(
     headers: Vec<(&'static str, String)>,
     permit: OwnedSemaphorePermit,
     slot: Option<OwnedSemaphorePermit>,
+    client_limiter: Option<std::sync::Arc<crate::router::limits::Limiter>>,
 ) -> Response<GwBody> {
     let config = &route.tables.config;
     let target = &planned.target;
+    let estimated = source.facts.est_input_tokens;
+    let settle = |usage: &airmate_core::ir::Usage| {
+        if let Some(l) = &client_limiter {
+            l.settle(
+                estimated,
+                usage.input_tokens + usage.cache_read_input_tokens,
+            );
+        }
+    };
     let client_model = source.facts.model.clone();
     let ir = match prepared.mode {
         Mode::Translate => source.ir(route).ok().map(|p| &p.value),
@@ -747,6 +812,7 @@ async fn finish(
                     match adapters::parse_response(core.protocol, 200, &bytes, &ctx) {
                         Ok(c) => {
                             route.rec.usage(&c.usage);
+                            settle(&c.usage);
                             let rctx = render_ctx(route, target, ir, source.facts, &client_model);
                             adapters::render_response_for(route.inbound, &c, &rctx)
                         }
@@ -763,12 +829,14 @@ async fn finish(
                 Mode::PassAnthropic => {
                     let (rewritten, summary) = passthrough::rewrite_response(&bytes, &client_model);
                     route.rec.usage(&summary.usage);
+                    settle(&summary.usage);
                     rewritten
                 }
                 Mode::PassJson { .. } => {
                     let (rewritten, usage) =
                         json_passthrough::rewrite_response(&bytes, &client_model, route.inbound);
                     route.rec.usage(&usage);
+                    settle(&usage);
                     rewritten
                 }
             };
@@ -807,6 +875,7 @@ async fn finish(
             let rec = route.rec.clone();
             let state = planned.state.clone();
             let clock = route.shared.router.clock.clone();
+            let limiter = client_limiter.clone();
             let stream = StreamBody::new(
                 body,
                 &first,
@@ -820,6 +889,12 @@ async fn finish(
                         state.breaker.on_failure(
                             clock.now(),
                             summary.error.as_deref().unwrap_or("stream error"),
+                        );
+                    }
+                    if let Some(l) = &limiter {
+                        l.settle(
+                            estimated,
+                            summary.usage.input_tokens + summary.usage.cache_read_input_tokens,
                         );
                     }
                     rec.finish_stream(&summary);

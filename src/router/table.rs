@@ -44,6 +44,8 @@ pub struct UpstreamRt {
     pub slots: Option<Arc<tokio::sync::Semaphore>>,
     /// The active health check, when configured: `(path, interval)`.
     pub health_check: Option<(String, Duration)>,
+    /// Request and token rate limits for this upstream.
+    pub rate: Option<crate::config::schema::RateLimit>,
 }
 
 impl UpstreamRt {
@@ -357,6 +359,7 @@ fn upstream_rt(
                 .health_check
                 .as_ref()
                 .map(|h| (h.path.clone(), Duration::from_secs(h.interval_secs))),
+            rate: u.rate,
         },
         warning,
     ))

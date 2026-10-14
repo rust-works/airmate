@@ -104,6 +104,8 @@ pub struct Tables {
     pub catalog: Catalog,
     /// The routing rules and the classifiers they consult.
     pub rules: RuleSet,
+    /// The named clients, by name.
+    pub clients: std::collections::HashMap<String, crate::config::schema::ClientConfig>,
 }
 
 impl Tables {
@@ -139,6 +141,11 @@ impl Tables {
             Self {
                 catalog: Catalog::new(&config.catalog),
                 rules,
+                clients: config
+                    .clients
+                    .iter()
+                    .map(|c| (c.name.clone(), c.clone()))
+                    .collect(),
                 config,
                 auth: Box::new(auth),
                 models,
@@ -210,6 +217,8 @@ pub struct Shared {
     pub log: Arc<dyn RecordSink>,
     /// What the router has learned: breakers, latency, affinity.
     pub router: Arc<RouterState>,
+    /// Rate limiters for clients and upstreams.
+    pub limits: crate::router::limits::Limits,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -326,6 +335,7 @@ pub async fn bind_with_deps(
         },
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
         log,
+        limits: crate::router::limits::Limits::new(clock.clone()),
         router: Arc::new(RouterState::new(
             clock,
             random,
