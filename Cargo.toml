@@ -16,4 +16,11 @@ categories = ["command-line-utilities"]
 rust-version = "1.88.0"
 
 [dependencies]
+# The sans-I/O translation core.
 airmate-core = { path = "airmate-core", version = "0.1.0" }
+# Derive (de)serialisation for the configuration schema.
+serde = { version = "1.0.229", features = ["derive"] }
+# JSON for the request log, `config show` and admin output.
+serde_json = "1.0.154"
+# YAML configuration (a maintained serde_yaml fork; serde_yaml itself is archived).
+serde_norway = "0.9.42"

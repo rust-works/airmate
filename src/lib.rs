@@ -1,6 +1,10 @@
-//! airmate: a tool for routing AI requests.
+//! airmate: a local, default-closed AI router.
 //!
-//! This is a placeholder. The binary currently prints a greeting and nothing else.
+//! A client speaks one protocol (the Anthropic Messages API, the OpenAI Chat Completions API or
+//! the OpenAI Responses API) to airmate, which translates the request, picks an upstream model,
+//! calls it, and translates the answer back, streaming included.
+
+pub mod config;
 
 /// The line the `airmate` binary prints.
 #[must_use]

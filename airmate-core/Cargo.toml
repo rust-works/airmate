@@ -13,12 +13,19 @@ categories = ["api-bindings"]
 rust-version = "1.88.0"
 
 [dependencies]
+# Base64url for thinking signatures and base64 for encrypted reasoning.
 base64 = "0.23.1"
+# HMAC-SHA256 for thinking signatures.
 hmac = "0.13.0"
+# Derive (de)serialisation for the signature payload.
 serde = { version = "1.0.229", features = ["derive"] }
+# Parse and build the JSON bodies of every protocol.
 serde_json = "1.0.154"
+# SHA-256 for the signing key, tool-name shortening and the prompt cache key.
 sha2 = "0.11.1"
+# Zero the signing key on drop.
 zeroize = { version = "1.9.1", features = ["derive"] }
 
 [dev-dependencies]
+# Property tests on the sequencer and the stream pipeline.
 proptest = "1.12.0"
