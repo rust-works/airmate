@@ -35,6 +35,10 @@ pub struct StreamSummary {
     pub completed: bool,
     /// Whether the client went away first.
     pub cancelled: bool,
+    /// The first bytes sent to the client, when body logging asked for them.
+    pub captured: Vec<u8>,
+    /// How many bytes were sent to the client in all, when body logging asked.
+    pub sent_bytes: usize,
 }
 
 /// Turns upstream bytes into client bytes.
@@ -156,16 +160,14 @@ impl Pipe {
             Self::Passthrough(p) => StreamSummary {
                 usage: p.summary().usage,
                 finish: p.summary().stop_reason.clone(),
-                error: None,
                 completed: p.completed(),
-                cancelled: false,
+                ..StreamSummary::default()
             },
             Self::Json(p) => StreamSummary {
                 usage: p.usage(),
                 finish: None,
-                error: None,
                 completed: p.completed(),
-                cancelled: false,
+                ..StreamSummary::default()
             },
         }
     }
@@ -185,7 +187,23 @@ pub struct StreamBody {
     ping_every: Duration,
     finished: bool,
     on_done: Option<OnDone>,
+    tap: Option<Tap>,
     _permits: Vec<OwnedSemaphorePermit>,
+}
+
+/// Copies the start of what is sent to the client, for the body log.
+struct Tap {
+    cap: usize,
+    buf: Vec<u8>,
+    total: usize,
+}
+
+impl Tap {
+    fn see(&mut self, b: &[u8]) {
+        self.total += b.len();
+        let room = self.cap.saturating_sub(self.buf.len());
+        self.buf.extend_from_slice(&b[..b.len().min(room)]);
+    }
 }
 
 impl StreamBody {
@@ -215,8 +233,22 @@ impl StreamBody {
             ping_every,
             finished: false,
             on_done,
+            tap: None,
             _permits: permits,
         }
+    }
+
+    /// Keeps the first `cap` bytes sent to the client, and their total, for the summary.
+    #[must_use]
+    pub fn with_tap(mut self, cap: usize) -> Self {
+        // Bytes already queued by the constructor are counted when they are polled out.
+        let tap = Tap {
+            cap,
+            buf: Vec::new(),
+            total: 0,
+        };
+        self.tap = Some(tap);
+        self
     }
 
     fn queue(&mut self, bytes: Vec<u8>) {
@@ -229,6 +261,10 @@ impl StreamBody {
         if let Some(cb) = self.on_done.take() {
             let mut summary = self.pipe.summary();
             summary.cancelled = cancelled;
+            if let Some(t) = self.tap.take() {
+                summary.captured = t.buf;
+                summary.sent_bytes = t.total;
+            }
             cb(summary);
         }
     }
@@ -254,6 +290,9 @@ impl Body for StreamBody {
         loop {
             if let Some(b) = this.out.pop_front() {
                 this.ping.as_mut().reset(Instant::now() + this.ping_every);
+                if let Some(t) = &mut this.tap {
+                    t.see(&b);
+                }
                 return Poll::Ready(Some(Ok(Frame::data(b))));
             }
             if this.finished {

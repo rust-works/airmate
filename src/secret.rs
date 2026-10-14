@@ -44,6 +44,22 @@ impl fmt::Display for Secret {
     }
 }
 
+/// Replaces every occurrence of each secret in `text` with `[redacted]`.
+///
+/// Upstreams sometimes echo what they were sent into their error messages; this is what keeps a key
+/// from going on to the client, the logs or the status page. Values shorter than 8 bytes are
+/// skipped, since replacing a short string would mangle ordinary text.
+#[must_use]
+pub fn redact<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = text.to_owned();
+    for s in secrets {
+        if s.len() >= 8 {
+            out = out.replace(s, "[redacted]");
+        }
+    }
+    out
+}
+
 /// Why a secret could not be resolved. Messages never contain the secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretError(pub String);

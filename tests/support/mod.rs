@@ -370,6 +370,69 @@ impl TestGateway {
         usage: Arc<dyn airmate::usage::UsageSink>,
         history: &[airmate::usage::UsageRecord],
     ) -> Self {
+        Self::start_all(
+            yaml,
+            env,
+            sink,
+            clock,
+            random,
+            usage,
+            history,
+            Arc::new(airmate::bodylog::NullBodies),
+        )
+        .await
+    }
+
+    /// Starts a gateway with request log, usage ledger and body log all captured.
+    pub async fn start_all_for_leaks(
+        yaml: &str,
+        env: EnvFn<'_>,
+        sink: Arc<dyn RecordSink>,
+        usage: Arc<dyn airmate::usage::UsageSink>,
+        bodies: Arc<dyn airmate::bodylog::BodySink>,
+    ) -> Self {
+        Self::start_all(
+            yaml,
+            env,
+            sink,
+            Arc::new(SystemClock::new()),
+            Arc::new(OsRandom),
+            usage,
+            &[],
+            bodies,
+        )
+        .await
+    }
+
+    /// Starts a gateway that also writes bodies to `bodies`.
+    pub async fn start_with_bodies(
+        yaml: &str,
+        bodies: Arc<dyn airmate::bodylog::BodySink>,
+    ) -> Self {
+        Self::start_all(
+            yaml,
+            &|_| None,
+            Arc::new(airmate::obs::NullSink),
+            Arc::new(SystemClock::new()),
+            Arc::new(OsRandom),
+            Arc::new(airmate::usage::NullUsage),
+            &[],
+            bodies,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_all(
+        yaml: &str,
+        env: EnvFn<'_>,
+        sink: Arc<dyn RecordSink>,
+        clock: Arc<dyn Clock>,
+        random: Arc<dyn Random>,
+        usage: Arc<dyn airmate::usage::UsageSink>,
+        history: &[airmate::usage::UsageRecord],
+        bodies: Arc<dyn airmate::bodylog::BodySink>,
+    ) -> Self {
         let mut config = load_str(yaml, None).unwrap_or_else(|e| panic!("bad test config:\n{e}"));
         config.server.port = 0;
         let token = "test-gateway-token".to_owned();
@@ -382,7 +445,8 @@ impl TestGateway {
         let gw = bind_with_deps(&config, tables, sink, clock, random)
             .await
             .unwrap()
-            .with_usage(usage, history);
+            .with_usage(usage, history)
+            .with_bodies(bodies);
         let addr = gw.local_addr();
         let shared = gw.shared();
         let (shutdown, rx) = watch::channel(false);

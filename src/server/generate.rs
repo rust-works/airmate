@@ -48,9 +48,10 @@ pub fn unix_now() -> u64 {
 /// An error response, with the routing headers when there are any.
 pub(super) fn fail_with(
     route: &Route,
-    e: GatewayError,
+    mut e: GatewayError,
     extra: &[(&'static str, String)],
 ) -> Response<GwBody> {
+    e.message = route.tables.redact(&e.message);
     if let Some(field) = &e.policy_field {
         route.rec.rejected(field);
     }
@@ -68,6 +69,7 @@ pub(super) fn fail(route: &Route, e: GatewayError) -> Response<GwBody> {
 }
 
 pub(super) fn json_ok(route: &Route, body: Vec<u8>, extra: &[(&str, String)]) -> Response<GwBody> {
+    route.log_body("response", 200, &body);
     let mut b = Response::builder()
         .status(200)
         .header("content-type", "application/json")
@@ -346,7 +348,8 @@ async fn attempt(
     let resp = match send(&target.upstream, &prepared.request, &parts.headers).await {
         Ok(r) => r,
         Err(e) => {
-            let error = e.into_gateway(&target.upstream.name);
+            let mut error = e.into_gateway(&target.upstream.name);
+            error.message = route.tables.redact(&error.message);
             route.rec.attempt(target, error.status(), None);
             return Err(from_gateway(error));
         }
@@ -362,13 +365,17 @@ async fn attempt(
         );
         let e = UpstreamError::from_response(status, &body);
         let (retryable, auth) = classify_status(status);
+        // What the upstream said may echo what it was sent, so it is scrubbed before it can reach
+        // the breaker's last error, the status page or the client.
+        let mut error = GatewayError::from_upstream(
+            &e,
+            label(target),
+            size_of(facts, planned.caps.context_window),
+            retry,
+        );
+        error.message = route.tables.redact(&error.message);
         return Err(Failure {
-            error: GatewayError::from_upstream(
-                &e,
-                label(target),
-                size_of(facts, planned.caps.context_window),
-                retry,
-            ),
+            error,
             retryable,
             auth,
             retry_after: retry,
@@ -461,6 +468,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         Ok(f) => f,
         Err(e) => return fail(&route, GatewayError::from_policy(&e)),
     };
+    route.log_body("request", 0, &body);
     route.rec.model_asked(&facts.model);
     route.rec.stream(facts.stream);
 
@@ -993,7 +1001,14 @@ async fn finish(
             let clock = route.shared.router.clock.clone();
             let limiter = client_limiter.clone();
             let meter = meter.clone();
-            let stream = StreamBody::new(
+            let body_cap = route
+                .shared
+                .bodies
+                .enabled()
+                .then(|| route.shared.bodies.max_bytes());
+            let shared = route.shared.clone();
+            let (rid, client) = (route.rid.clone(), route.identity.client.clone());
+            let mut stream = StreamBody::new(
                 body,
                 &first,
                 pipe,
@@ -1015,9 +1030,26 @@ async fn finish(
                         );
                     }
                     meter.settle(&summary.usage);
+                    if body_cap.is_some() {
+                        let cap = shared.bodies.max_bytes();
+                        let mut r = crate::bodylog::make_record(
+                            &rid,
+                            &client,
+                            "response",
+                            200,
+                            &summary.captured,
+                            cap,
+                        );
+                        r.bytes = summary.sent_bytes;
+                        r.truncated = summary.sent_bytes > summary.captured.len();
+                        shared.bodies.record(&r);
+                    }
                     rec.finish_stream(&summary);
                 })),
             );
+            if let Some(cap) = body_cap {
+                stream = stream.with_tap(cap);
+            }
             let mut b = Response::builder()
                 .status(200)
                 .header("content-type", "text/event-stream")

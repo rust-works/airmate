@@ -109,9 +109,17 @@ pub struct Tables {
     pub clients: std::collections::HashMap<String, crate::config::schema::ClientConfig>,
     /// Prices for models whose target and catalog entry carry none.
     pub prices: crate::usage::PriceTable,
+    /// Secrets scrubbed from any text that goes to a client, a log or the status page.
+    redactions: Vec<Secret>,
 }
 
 impl Tables {
+    /// `text` with every upstream key and the gateway token replaced by `[redacted]`.
+    #[must_use]
+    pub fn redact(&self, text: &str) -> String {
+        crate::secret::redact(text, self.redactions.iter().map(Secret::expose))
+    }
+
     /// Builds the tables from a configuration, resolving every secret.
     ///
     /// # Errors
@@ -140,11 +148,17 @@ impl Tables {
         let auth = crate::auth::TokenAuthenticator::new(gateway_token, &config.clients)
             .map_err(|e| vec![ConfigError::new("clients", e.to_string())])?;
         let rules = compile_rules(&config, &models, sink);
+        let redactions: Vec<Secret> = models
+            .upstreams()
+            .filter_map(|u| u.api_key.clone())
+            .chain(std::iter::once(gateway_token.clone()))
+            .collect();
         let prices = crate::usage::PriceTable::load(&config.usage.prices)
             .map_err(|e| vec![ConfigError::new("usage.prices", e)])?;
         Ok((
             Self {
                 prices,
+                redactions,
                 catalog: Catalog::new(&config.catalog),
                 rules,
                 clients: config
@@ -229,6 +243,8 @@ pub struct Shared {
     pub usage: Arc<dyn UsageSink>,
     /// Spend per client, for budgets.
     pub budgets: Budgets,
+    /// Where request and response bodies go, when body logging is on.
+    pub bodies: Arc<dyn crate::bodylog::BodySink>,
     /// Counters and histograms behind `/metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
     /// When the gateway started.
@@ -357,6 +373,7 @@ pub async fn bind_with_deps(
         listen: local,
         limits: crate::router::limits::Limits::new(clock.clone()),
         usage: Arc::new(NullUsage),
+        bodies: Arc::new(crate::bodylog::NullBodies),
         budgets: Budgets::new(),
         router: Arc::new(RouterState::new(
             clock,
@@ -395,6 +412,19 @@ impl BoundGateway {
             .expect("with_usage must be called before the shared state is handed out");
         shared.usage = sink;
         shared.budgets = Budgets::rebuild(history);
+        self
+    }
+
+    /// Logs request and response bodies to `sink`.
+    ///
+    /// # Panics
+    ///
+    /// If called after [`BoundGateway::shared`] has handed the shared state out.
+    #[must_use]
+    pub fn with_bodies(mut self, sink: Arc<dyn crate::bodylog::BodySink>) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("with_bodies must be called before the shared state is handed out")
+            .bodies = sink;
         self
     }
 
@@ -520,6 +550,23 @@ pub struct Route {
     pub inbound: Protocol,
     /// Accumulates the request-log record.
     pub rec: record::Recorder,
+}
+
+impl Route {
+    /// Writes a body to the body log, if that is on.
+    pub fn log_body(&self, direction: &str, status: u16, bytes: &[u8]) {
+        let bodies = &self.shared.bodies;
+        if bodies.enabled() {
+            bodies.record(&crate::bodylog::make_record(
+                &self.rid,
+                &self.identity.client,
+                direction,
+                status,
+                bytes,
+                bodies.max_bytes(),
+            ));
+        }
+    }
 }
 
 /// Reads a request body, refusing more than `max` bytes.

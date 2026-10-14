@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod bodylog;
 pub mod cli;
 pub mod config;
 pub mod keychain;

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::common::{gateway_token, load, CliError, Global, Process};
+use crate::bodylog::{BodySink, JsonlBodies, NullBodies};
 use crate::config::overrides::Overrides;
 use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
 use crate::secret::SystemResolver;
@@ -40,11 +41,15 @@ pub fn serve(
         .build()
         .map_err(|e| CliError::runtime(format!("cannot start the async runtime: {e}")))?;
     rt.block_on(async {
+        // Handlers go in before the gateway is announced: a SIGHUP that arrives first would
+        // otherwise take the process down with the default action.
+        let mut signals = Signals::new();
         let (usage_sink, history) = usage_ledger(&config, &loaded.dirs.usage_ledger(), err);
         let gw = bind_with(&config, tables, sink.clone())
             .await
             .map_err(|e| CliError::runtime(e.to_string()))?
-            .with_usage(usage_sink, &history);
+            .with_usage(usage_sink, &history)
+            .with_bodies(body_log(&config, &loaded.dirs.body_log(), err));
         let _ = writeln!(
             err,
             "airmate {} listening on http://{} ({}; {} upstream(s), {} model entr{})",
@@ -80,7 +85,6 @@ pub fn serve(
                 .map_err(|_| "the gateway is shutting down".to_owned())?
         });
         let admin = start_admin(&loaded.dirs.admin_socket(), &shared, reload_fn, &rx, err);
-        let mut signals = Signals::new();
         loop {
             tokio::select! {
                 signal = signals.next() => match signal {
@@ -239,6 +243,41 @@ impl Signals {
     async fn next(&mut self) -> Signal {
         let _ = tokio::signal::ctrl_c().await;
         Signal::Stop
+    }
+}
+
+/// Opens the body log if the configuration asks for one. Bodies hold prompts and completions, so
+/// a log that cannot be opened is reported and bodies are simply not written.
+fn body_log(
+    config: &crate::config::schema::Config,
+    path: &std::path::Path,
+    err: &mut dyn Write,
+) -> Arc<dyn BodySink> {
+    if !config.log.bodies {
+        return Arc::new(NullBodies);
+    }
+    match JsonlBodies::open(
+        path,
+        config.log.body_max_bytes,
+        config.log.body_retention_days,
+    ) {
+        Ok(log) => {
+            let _ = writeln!(
+                err,
+                "airmate: warning: body logging is on: prompts and completions are written to {} (kept {} days)",
+                path.display(),
+                config.log.body_retention_days
+            );
+            Arc::new(log)
+        }
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "airmate: warning: cannot open the body log {}: {e}; bodies are not logged",
+                path.display()
+            );
+            Arc::new(NullBodies)
+        }
     }
 }
 
