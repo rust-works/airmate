@@ -38,6 +38,7 @@ use crate::router::rules::{Action, Classifier, CompiledRule, RuleSet};
 use crate::router::state::RouterState;
 use crate::router::ModelTable;
 use crate::secret::{Secret, SecretResolver};
+use crate::usage::{Budgets, NullUsage, UsageSink};
 use guard::{check_host, check_origin, extract_token, GuardConfig};
 
 /// The response body type: either a buffered body or a stream.
@@ -106,6 +107,8 @@ pub struct Tables {
     pub rules: RuleSet,
     /// The named clients, by name.
     pub clients: std::collections::HashMap<String, crate::config::schema::ClientConfig>,
+    /// Prices for models whose target and catalog entry carry none.
+    pub prices: crate::usage::PriceTable,
 }
 
 impl Tables {
@@ -137,8 +140,11 @@ impl Tables {
         let auth = crate::auth::TokenAuthenticator::new(gateway_token, &config.clients)
             .map_err(|e| vec![ConfigError::new("clients", e.to_string())])?;
         let rules = compile_rules(&config, &models, sink);
+        let prices = crate::usage::PriceTable::load(&config.usage.prices)
+            .map_err(|e| vec![ConfigError::new("usage.prices", e)])?;
         Ok((
             Self {
+                prices,
                 catalog: Catalog::new(&config.catalog),
                 rules,
                 clients: config
@@ -219,6 +225,10 @@ pub struct Shared {
     pub router: Arc<RouterState>,
     /// Rate limiters for clients and upstreams.
     pub limits: crate::router::limits::Limits,
+    /// Where usage ledger lines go.
+    pub usage: Arc<dyn UsageSink>,
+    /// Spend per client, for budgets.
+    pub budgets: Budgets,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -336,6 +346,8 @@ pub async fn bind_with_deps(
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
         log,
         limits: crate::router::limits::Limits::new(clock.clone()),
+        usage: Arc::new(NullUsage),
+        budgets: Budgets::new(),
         router: Arc::new(RouterState::new(
             clock,
             random,
@@ -356,6 +368,24 @@ impl BoundGateway {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Records usage to `sink` and starts the budgets from `history`, the ledger as it stands.
+    ///
+    /// # Panics
+    ///
+    /// If called after [`BoundGateway::shared`] has handed the shared state out.
+    #[must_use]
+    pub fn with_usage(
+        mut self,
+        sink: Arc<dyn UsageSink>,
+        history: &[crate::usage::UsageRecord],
+    ) -> Self {
+        let shared = Arc::get_mut(&mut self.shared)
+            .expect("with_usage must be called before the shared state is handed out");
+        shared.usage = sink;
+        shared.budgets = Budgets::rebuild(history);
+        self
     }
 
     /// The shared state, for reload.

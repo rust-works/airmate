@@ -11,6 +11,7 @@ use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
 use crate::secret::SystemResolver;
 use crate::server::reload::reload;
 use crate::server::{bind_with, Tables};
+use crate::usage::{NullUsage, UsageRecord, UsageSink};
 
 /// Runs the gateway until interrupted.
 ///
@@ -39,9 +40,11 @@ pub fn serve(
         .build()
         .map_err(|e| CliError::runtime(format!("cannot start the async runtime: {e}")))?;
     rt.block_on(async {
+        let (usage_sink, history) = usage_ledger(&config, &loaded.dirs.usage_ledger(), err);
         let gw = bind_with(&config, tables, sink.clone())
             .await
-            .map_err(|e| CliError::runtime(e.to_string()))?;
+            .map_err(|e| CliError::runtime(e.to_string()))?
+            .with_usage(usage_sink, &history);
         let _ = writeln!(
             err,
             "airmate {} listening on http://{} ({}; {} upstream(s), {} model entr{})",
@@ -138,6 +141,43 @@ async fn wait_for_signal() -> Signal {
 async fn wait_for_signal() -> Signal {
     let _ = tokio::signal::ctrl_c().await;
     Signal::Stop
+}
+
+/// Opens the usage ledger if the configuration asks for one, and reads what is already in it so
+/// that budgets survive a restart. Without a ledger, budgets still hold but start from zero.
+fn usage_ledger(
+    config: &crate::config::schema::Config,
+    path: &std::path::Path,
+    err: &mut dyn Write,
+) -> (Arc<dyn UsageSink>, Vec<UsageRecord>) {
+    let has_budget = config.clients.iter().any(|c| c.budget.is_some());
+    if !config.usage.ledger {
+        if has_budget {
+            let _ = writeln!(
+                err,
+                "airmate: warning: clients have budgets but `usage.ledger` is off, so spend is forgotten on restart"
+            );
+        }
+        return (Arc::new(NullUsage), Vec::new());
+    }
+    let history = match crate::usage::read_file(path) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = writeln!(err, "airmate: warning: {e}");
+            Vec::new()
+        }
+    };
+    match JsonlLog::open(path, None) {
+        Ok(log) => (Arc::new(log), history),
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "airmate: warning: cannot open the usage ledger {}: {e}",
+                path.display()
+            );
+            (Arc::new(NullUsage), history)
+        }
+    }
 }
 
 /// Opens the request log if the configuration asks for one; a log that cannot be opened is

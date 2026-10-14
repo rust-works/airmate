@@ -69,6 +69,8 @@ pub struct PlanInput<'a> {
     pub body: &'a [u8],
     /// Looks up an allow-listed request header.
     pub header: &'a (dyn Fn(&str) -> Option<String> + Sync),
+    /// A model entry to use whatever the rules and the model name say (a budget fallback).
+    pub force_entry: Option<&'a str>,
 }
 
 fn rule_to_entry(rule: &CompiledRule, table: &ModelTable) -> Option<Arc<ModelEntry>> {
@@ -107,26 +109,36 @@ pub async fn plan(
         header: input.header,
         hour,
     };
-    let selected = rules.select(&ctx, &classifier_input).await;
+    let forced = input
+        .force_entry
+        .and_then(|n| table.entry_by_name(n))
+        .cloned();
+    let selected = if forced.is_some() {
+        None
+    } else {
+        rules.select(&ctx, &classifier_input).await
+    };
 
-    let (entry, rule, via) =
-        match selected.and_then(|r| rule_to_entry(r, table).map(|e| (e, r.name.clone()))) {
-            Some((e, name)) => (e, Some(name), None),
-            None => match table.resolve_via(&facts.model, facts.inbound) {
-                (Resolution::Entry(e) | Resolution::Direct(e), via) if !e.targets.is_empty() => {
-                    (e, None, via)
-                }
-                _ => {
-                    return Err(GatewayError::new(
-                        ErrorKind::NotFound,
-                        format!(
+    let chosen = forced.map(|e| (e, None)).or_else(|| {
+        selected.and_then(|r| rule_to_entry(r, table).map(|e| (e, Some(r.name.clone()))))
+    });
+    let (entry, rule, via) = match chosen {
+        Some((e, name)) => (e, name, None),
+        None => match table.resolve_via(&facts.model, facts.inbound) {
+            (Resolution::Entry(e) | Resolution::Direct(e), via) if !e.targets.is_empty() => {
+                (e, None, via)
+            }
+            _ => {
+                return Err(GatewayError::new(
+                    ErrorKind::NotFound,
+                    format!(
                         "the model `{}` is not mapped to an upstream model; see `airmate models`",
                         facts.model
                     ),
-                    ))
-                }
-            },
-        };
+                ))
+            }
+        },
+    };
 
     let (ok, skipped) = filter(&entry.targets, facts, catalog);
     if ok.is_empty() {
@@ -382,6 +394,7 @@ mod tests {
                 client: "default",
                 body,
                 header: &none,
+                force_entry: None,
             },
         )
         .await
@@ -616,6 +629,7 @@ mod tests {
                 client: "default",
                 body,
                 header: &none,
+                force_entry: None,
             },
         )
         .await

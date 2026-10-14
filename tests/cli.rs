@@ -1059,3 +1059,97 @@ async fn a_key_made_by_the_cli_authenticates_against_a_running_gateway_and_obeys
     let _ = child.wait();
     assert_eq!((s1, s2, s3), (200, 429, 401));
 }
+
+fn write_ledger(h: &Home) {
+    let dir = h.0.join("state/airmate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = |client: &str, target: &str, ts: &str, unix: u64, cost: &str| {
+        format!(
+            "{{\"ts\":\"{ts}\",\"unix\":{unix},\"client\":\"{client}\",\"target\":\"{target}\",\"upstream_model\":\"{}\",\"input_tokens\":100,\"output_tokens\":10,\"cached_tokens\":0,\"cost_usd\":{cost}}}\n",
+            target.split('/').nth(1).unwrap()
+        )
+    };
+    let text = [
+        line(
+            "ci",
+            "fw/llama",
+            "2026-10-13T10:00:00.000Z",
+            1_791_885_600,
+            "0.5",
+        ),
+        line(
+            "ci",
+            "fw/llama",
+            "2026-10-14T10:00:00.000Z",
+            1_791_972_000,
+            "null",
+        ),
+        line(
+            "laptop",
+            "oa/gpt",
+            "2026-10-14T11:00:00.000Z",
+            1_791_975_600,
+            "2.0",
+        ),
+    ]
+    .concat()
+        + "garbage that is skipped\n";
+    std::fs::write(dir.join("usage.jsonl"), text).unwrap();
+}
+
+#[test]
+fn usage_aggregates_the_ledger_and_never_shows_unknown_cost_as_zero() {
+    let h = Home::new("usage");
+    h.write_config("usage:\n  ledger: true\n");
+    write_ledger(&h);
+    let o = h.cmd().arg("usage").output().unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    let t = out(&o);
+    assert!(t.starts_with("CLIENT"), "{t}");
+    assert!(
+        t.contains("$0.5000 (+1 unpriced)") && t.contains("$2.0000"),
+        "{t}"
+    );
+
+    let o = h
+        .cmd()
+        .args(["usage", "--by", "upstream", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["fw", "oa"]
+    );
+    assert_eq!(rows[0]["unpriced_requests"], 1);
+
+    let o = h
+        .cmd()
+        .args(["usage", "--by", "day", "--since", "2026-10-14"])
+        .output()
+        .unwrap();
+    let t = out(&o);
+    assert!(t.contains("2026-10-14") && !t.contains("2026-10-13"), "{t}");
+}
+
+#[test]
+fn usage_explains_an_empty_ledger_and_rejects_a_bad_since() {
+    let h = Home::new("usage-empty");
+    let o = h.cmd().arg("usage").output().unwrap();
+    assert!(o.status.success());
+    assert!(out(&o).contains("`usage.ledger` is off"), "{}", out(&o));
+    h.write_config("usage:\n  ledger: true\n");
+    let o = h.cmd().arg("usage").output().unwrap();
+    assert!(out(&o).contains("nothing has been recorded"), "{}", out(&o));
+    let o = h
+        .cmd()
+        .args(["usage", "--since", "yesterday"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(errs(&o).contains("--since"), "{}", errs(&o));
+}

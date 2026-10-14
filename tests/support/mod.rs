@@ -347,6 +347,29 @@ impl TestGateway {
         clock: Arc<dyn Clock>,
         random: Arc<dyn Random>,
     ) -> Self {
+        Self::start_metered(
+            yaml,
+            env,
+            sink,
+            clock,
+            random,
+            Arc::new(airmate::usage::NullUsage),
+            &[],
+        )
+        .await
+    }
+
+    /// Starts a gateway that also writes the usage ledger to `usage`, with budgets starting
+    /// from `history`.
+    pub async fn start_metered(
+        yaml: &str,
+        env: EnvFn<'_>,
+        sink: Arc<dyn RecordSink>,
+        clock: Arc<dyn Clock>,
+        random: Arc<dyn Random>,
+        usage: Arc<dyn airmate::usage::UsageSink>,
+        history: &[airmate::usage::UsageRecord],
+    ) -> Self {
         let mut config = load_str(yaml, None).unwrap_or_else(|e| panic!("bad test config:\n{e}"));
         config.server.port = 0;
         let token = "test-gateway-token".to_owned();
@@ -358,7 +381,8 @@ impl TestGateway {
         .unwrap_or_else(|e| panic!("tables: {e:?}"));
         let gw = bind_with_deps(&config, tables, sink, clock, random)
             .await
-            .unwrap();
+            .unwrap()
+            .with_usage(usage, history);
         let addr = gw.local_addr();
         let shared = gw.shared();
         let (shutdown, rx) = watch::channel(false);

@@ -6,11 +6,13 @@ pub mod keys_cmd;
 pub mod route_cmd;
 pub mod run_cmd;
 pub mod serve;
+pub mod usage_cmd;
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
+use crate::usage::GroupBy;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::config::overrides::{parse_flavor, parse_model_map, parse_protocol, Overrides};
@@ -55,6 +57,8 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Show token usage and cost from the usage ledger.
+    Usage(UsageArgs),
     /// Create, list, revoke and rotate client keys.
     Keys {
         /// What to do.
@@ -193,6 +197,42 @@ pub enum TableFormat {
     Md,
     /// JSON.
     Json,
+}
+
+/// What `usage` groups by.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum UsageBy {
+    /// The client.
+    Client,
+    /// The upstream model.
+    Model,
+    /// The upstream.
+    Upstream,
+    /// The UTC day.
+    Day,
+}
+
+/// How `usage` prints.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum UsageFormat {
+    /// An aligned table.
+    Table,
+    /// JSON.
+    Json,
+}
+
+/// `usage` arguments.
+#[derive(Debug, Args)]
+pub struct UsageArgs {
+    /// What to group by.
+    #[arg(long, value_enum, default_value = "client")]
+    pub by: UsageBy,
+    /// Only requests since a span back from now (`24h`, `7d`) or a UTC date (`2026-10-01`).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Output format.
+    #[arg(long, value_enum, default_value = "table")]
+    pub format: UsageFormat,
 }
 
 /// `keys` actions.
@@ -336,6 +376,22 @@ fn dispatch(
             KeysAction::Revoke { name } => keys_cmd::revoke(p, global, name, out),
             KeysAction::Rotate { name, save } => keys_cmd::rotate(p, global, name, *save, out),
         },
+        Command::Usage(a) => usage_cmd::usage(
+            p,
+            global,
+            match a.by {
+                UsageBy::Client => GroupBy::Client,
+                UsageBy::Model => GroupBy::Model,
+                UsageBy::Upstream => GroupBy::Upstream,
+                UsageBy::Day => GroupBy::Day,
+            },
+            a.since.as_deref(),
+            match a.format {
+                UsageFormat::Table => usage_cmd::Format::Table,
+                UsageFormat::Json => usage_cmd::Format::Json,
+            },
+            out,
+        ),
         Command::Models { check } => route_cmd::models(p, global, *check, out),
         Command::Config { action } => config_command(p, global, action, out),
         #[cfg(feature = "completions")]

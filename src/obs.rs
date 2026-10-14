@@ -194,9 +194,10 @@ impl JsonlLog {
     }
 }
 
-impl RecordSink for JsonlLog {
-    fn record(&self, rec: &RequestRecord) {
-        let Ok(mut line) = serde_json::to_vec(rec) else {
+impl JsonlLog {
+    /// Appends one value as a line. Failures are dropped: a log must never fail a request.
+    pub fn append<T: Serialize>(&self, value: &T) {
+        let Ok(mut line) = serde_json::to_vec(value) else {
             return;
         };
         line.push(b'\n');
@@ -211,6 +212,12 @@ impl RecordSink for JsonlLog {
         if inner.file.write_all(&line).is_ok() {
             inner.size += line.len() as u64;
         }
+    }
+}
+
+impl RecordSink for JsonlLog {
+    fn record(&self, rec: &RequestRecord) {
+        self.append(rec);
     }
 }
 

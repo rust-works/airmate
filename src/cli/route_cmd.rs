@@ -103,6 +103,7 @@ pub async fn explain(
             client,
             body,
             header: &header,
+            force_entry: None,
         },
     )
     .await

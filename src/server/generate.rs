@@ -481,6 +481,40 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
             })
             .flatten()
     };
+    // Budgets: an exhausted one is a 429, unless the client names an entry to fall back to.
+    let client_cfg = route.tables.clients.get(&route.identity.client);
+    let mut fallback: Option<&str> = None;
+    if let Some(c) = client_cfg {
+        let now = route.shared.router.clock.unix_secs();
+        if let Some(ex) = c
+            .budget
+            .as_ref()
+            .and_then(|b| route.shared.budgets.exhausted(&c.name, b, now))
+        {
+            match c.budget_fallback.as_deref() {
+                Some(entry) => fallback = Some(entry),
+                None => {
+                    return fail(
+                        &route,
+                        GatewayError::new(
+                            ErrorKind::RateLimit,
+                            format!(
+                                "budget exhausted: client `{}` has spent ${:.2} of its {} budget of ${:.2}; it renews at {}",
+                                c.name,
+                                ex.spent,
+                                ex.period.name(),
+                                ex.cap,
+                                crate::obs::rfc3339(
+                                    std::time::UNIX_EPOCH + Duration::from_secs(ex.renews_at)
+                                ),
+                            ),
+                        )
+                        .with_retry_after(Some(ex.renews_at.saturating_sub(now).max(1))),
+                    );
+                }
+            }
+        }
+    }
     let planned = match plan(
         &route.tables.models,
         &route.tables.rules,
@@ -492,6 +526,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
             client: &route.identity.client,
             body: &body,
             header: &header,
+            force_entry: fallback,
         },
     )
     .await
@@ -503,9 +538,9 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     let mut skipped = planned.skipped.clone();
 
     // Per-client controls: which models it may use, and how fast.
-    let client_cfg = route.tables.clients.get(&route.identity.client);
     if let Some(c) = client_cfg {
-        if !c.models.is_empty()
+        if fallback.is_none()
+            && !c.models.is_empty()
             && !c
                 .models
                 .iter()
@@ -774,6 +809,72 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     }
 }
 
+/// Prices a finished request, then writes its ledger line and counts it against the budget.
+#[derive(Clone)]
+struct Meter {
+    shared: std::sync::Arc<super::Shared>,
+    rec: super::record::Recorder,
+    request_id: String,
+    client: String,
+    model_asked: String,
+    target: String,
+    upstream_model: String,
+    price: Option<crate::config::schema::Price>,
+}
+
+impl Meter {
+    fn new(route: &Route, planned: &Planned, model_asked: &str) -> Self {
+        let target = &planned.target;
+        Self {
+            shared: route.shared.clone(),
+            rec: route.rec.clone(),
+            request_id: route.rid.clone(),
+            client: route.identity.client.clone(),
+            model_asked: model_asked.to_owned(),
+            target: target.label(),
+            upstream_model: target.model.clone(),
+            // The target's own price wins, then the catalog's, then the price table's.
+            price: planned
+                .caps
+                .price
+                .or_else(|| route.tables.prices.lookup(&target.model)),
+        }
+    }
+
+    /// Records usage. A request with no price has cost `None`, which is not zero and adds
+    /// nothing to a budget.
+    fn settle(&self, usage: &airmate_core::ir::Usage) {
+        let cost = self.price.map(|p| crate::usage::cost_usd(&p, usage));
+        self.rec.cost(cost);
+        let empty = usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_input_tokens
+            + usage.reasoning_tokens
+            == 0;
+        if empty {
+            return;
+        }
+        let unix = self.shared.router.clock.unix_secs();
+        if let Some(c) = cost {
+            self.shared.budgets.record(&self.client, unix, c);
+        }
+        self.shared.usage.record(&crate::usage::UsageRecord {
+            ts: crate::obs::rfc3339(std::time::UNIX_EPOCH + Duration::from_secs(unix)),
+            unix,
+            request_id: self.request_id.clone(),
+            client: self.client.clone(),
+            model_asked: self.model_asked.clone(),
+            target: self.target.clone(),
+            upstream_model: self.upstream_model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_tokens: usage.cache_read_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            cost_usd: cost,
+        });
+    }
+}
+
 /// Turns a delivered answer into the response for the client.
 #[allow(clippy::too_many_arguments)]
 async fn finish(
@@ -790,7 +891,9 @@ async fn finish(
     let config = &route.tables.config;
     let target = &planned.target;
     let estimated = source.facts.est_input_tokens;
+    let meter = Meter::new(route, planned, &source.facts.model);
     let settle = |usage: &airmate_core::ir::Usage| {
+        meter.settle(usage);
         if let Some(l) = &client_limiter {
             l.settle(
                 estimated,
@@ -876,6 +979,7 @@ async fn finish(
             let state = planned.state.clone();
             let clock = route.shared.router.clock.clone();
             let limiter = client_limiter.clone();
+            let meter = meter.clone();
             let stream = StreamBody::new(
                 body,
                 &first,
@@ -897,6 +1001,7 @@ async fn finish(
                             summary.usage.input_tokens + summary.usage.cache_read_input_tokens,
                         );
                     }
+                    meter.settle(&summary.usage);
                     rec.finish_stream(&summary);
                 })),
             );
