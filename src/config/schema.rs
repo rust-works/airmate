@@ -665,13 +665,21 @@ pub struct ClientConfig {
 }
 
 /// `circuit:` breaker defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CircuitConfig {
     /// Consecutive retryable failures that open the breaker.
     pub failure_threshold: u32,
     /// Seconds the breaker stays open.
     pub cooldown_secs: u64,
+    /// The longest the cooldown grows to after repeated failed probes, in seconds.
+    pub max_cooldown_secs: u64,
+    /// How many recent outcomes the error rate is computed over.
+    pub window: usize,
+    /// The fewest outcomes in the window before the error rate can open the breaker.
+    pub min_samples: usize,
+    /// The error rate over the window that opens the breaker (0.0 to 1.0).
+    pub error_rate: f64,
 }
 
 impl Default for CircuitConfig {
@@ -679,6 +687,10 @@ impl Default for CircuitConfig {
         Self {
             failure_threshold: default_failure_threshold(),
             cooldown_secs: default_cooldown(),
+            max_cooldown_secs: 600,
+            window: 20,
+            min_samples: 10,
+            error_rate: 0.5,
         }
     }
 }

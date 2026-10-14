@@ -386,6 +386,24 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
             "must be at least 1",
         ));
     }
+    if c.circuit.window == 0 || c.circuit.min_samples > c.circuit.window {
+        out.push(ConfigError::new(
+            "circuit.window",
+            "must be at least 1 and not below min_samples",
+        ));
+    }
+    if !(0.0..=1.0).contains(&c.circuit.error_rate) {
+        out.push(ConfigError::new(
+            "circuit.error_rate",
+            "must be between 0 and 1",
+        ));
+    }
+    if c.circuit.max_cooldown_secs < c.circuit.cooldown_secs {
+        out.push(ConfigError::new(
+            "circuit.max_cooldown_secs",
+            "must not be below cooldown_secs",
+        ));
+    }
     if c.failover.max_attempts == 0 {
         out.push(ConfigError::new(
             "failover.max_attempts",
