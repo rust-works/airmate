@@ -97,6 +97,7 @@ pub struct AnthropicRender {
     kinds: HashMap<u32, BlockKind>,
     usage: Usage,
     refusal: bool,
+    refusal_block: Option<u32>,
     refusals: u32,
 }
 
@@ -115,6 +116,7 @@ impl AnthropicRender {
             kinds: HashMap::new(),
             usage: Usage::default(),
             refusal: false,
+            refusal_block: None,
             refusals: 0,
         }
     }
@@ -173,23 +175,41 @@ impl AnthropicRender {
             IrEvent::Usage(u) => self.usage = *u,
             IrEvent::Refusal { text } => {
                 self.refusal = true;
-                let block = REFUSAL_BLOCK_BASE + self.refusals;
-                self.refusals += 1;
+                // Consecutive refusal chunks are one block.
+                let block = match self.refusal_block {
+                    Some(b) => b,
+                    None => {
+                        let b = REFUSAL_BLOCK_BASE + self.refusals;
+                        self.refusals += 1;
+                        self.refusal_block = Some(b);
+                        b
+                    }
+                };
                 out.extend(self.sequence(&IrEvent::TextDelta {
                     block,
                     text: text.clone(),
                 }));
-                out.extend(self.sequence(&IrEvent::TextEnd { block }));
             }
             IrEvent::Finish(reason) => {
+                out.extend(self.close_refusal());
                 out.extend(self.finish_message(*reason));
             }
             IrEvent::Error(e) => {
                 out.extend(self.error_event(e.kind, &e.message));
             }
-            block_event => out.extend(self.sequence(block_event)),
+            block_event => {
+                out.extend(self.close_refusal());
+                out.extend(self.sequence(block_event));
+            }
         }
         out
+    }
+
+    fn close_refusal(&mut self) -> Vec<u8> {
+        match self.refusal_block.take() {
+            Some(block) => self.sequence(&IrEvent::TextEnd { block }),
+            None => Vec::new(),
+        }
     }
 
     /// Ends the render. Parsers always end a stream with a finish or an error, so this only emits
@@ -726,6 +746,38 @@ mod tests {
         let md = &evs.iter().find(|(n, _)| n == "message_delta").unwrap().1["delta"];
         assert_eq!(md["stop_reason"], "refusal");
         assert_eq!(md["stop_details"], json!({"type": "refusal"}));
+    }
+
+    #[test]
+    fn consecutive_refusal_chunks_are_one_text_block() {
+        let evs = render(
+            &[
+                IrEvent::Refusal {
+                    text: "I can't ".into(),
+                },
+                IrEvent::Refusal {
+                    text: "help.".into(),
+                },
+                text(1, "after"),
+                IrEvent::TextEnd { block: 1 },
+                IrEvent::Finish(FinishReason::Stop),
+            ],
+            ctx(),
+        );
+        let starts = evs
+            .iter()
+            .filter(|(n, _)| n == "content_block_start")
+            .count();
+        assert_eq!(
+            starts, 2,
+            "one block for the refusal, one for the text after it"
+        );
+        let first: String = evs
+            .iter()
+            .filter(|(_, j)| j["index"] == 0)
+            .filter_map(|(_, j)| j.pointer("/delta/text").and_then(Json::as_str))
+            .collect();
+        assert_eq!(first, "I can't help.");
     }
 
     #[test]
