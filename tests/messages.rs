@@ -530,3 +530,105 @@ async fn more_than_four_stop_sequences_are_rejected_only_where_the_upstream_caps
         5
     );
 }
+
+#[tokio::test]
+async fn every_request_and_every_attempt_is_logged_without_secrets_or_bodies() {
+    use airmate::obs::RecordKind;
+    let mock = Mock::start(|_| Reply::json(200, chat_ok("SECRET-REPLY-TEXT"))).await;
+    let cap = std::sync::Arc::new(support::Capture::default());
+    let env = env_with_key("UP_KEY", UP_KEY);
+    let gw = TestGateway::start_with_sink(
+        &yaml_for(&mock.url(), "chat", "generic", "", ""),
+        &env,
+        cap.clone(),
+    )
+    .await;
+    let mut req = request("claude-sonnet-4");
+    req["messages"][0]["content"] = json!("SECRET-PROMPT-TEXT");
+    req["metadata"] = json!({"user_id": "u"});
+    let r = gw
+        .post_with("/v1/messages", &req, &[("x-request-id", "rid-42")])
+        .await;
+    assert_eq!(r.status, 200);
+
+    let recs = cap.wait_for(2).await;
+    assert_eq!(recs.len(), 2, "one attempt and one request: {recs:?}");
+    let attempt = recs.iter().find(|r| r.kind == RecordKind::Attempt).unwrap();
+    let request_rec = recs.iter().find(|r| r.kind == RecordKind::Request).unwrap();
+    assert_eq!(attempt.target.as_deref(), Some("up/upstream-model"));
+    assert_eq!((attempt.status, attempt.attempts), (200, 1));
+    assert_eq!(request_rec.request_id, "rid-42");
+    assert_eq!(request_rec.client, "default");
+    assert_eq!(request_rec.inbound, "anthropic");
+    assert_eq!(request_rec.model_asked, "claude-sonnet-4");
+    assert_eq!(
+        request_rec.upstream_model.as_deref(),
+        Some("upstream-model")
+    );
+    assert_eq!(
+        (request_rec.status, request_rec.attempts, request_rec.stream),
+        (200, 1, false)
+    );
+    assert_eq!(
+        (
+            request_rec.input_tokens,
+            request_rec.output_tokens,
+            request_rec.cached_tokens
+        ),
+        (9, 3, 2)
+    );
+    assert_eq!(request_rec.ignored, ["metadata"]);
+    assert!(request_rec.ttfb_ms.is_some());
+    let everything = serde_json::to_string(&recs).unwrap();
+    for secret in [UP_KEY, "SECRET-PROMPT-TEXT", "SECRET-REPLY-TEXT", &gw.token] {
+        assert!(!everything.contains(secret), "{secret} leaked into the log");
+    }
+}
+
+#[tokio::test]
+async fn refused_and_failed_requests_are_logged_with_their_class() {
+    let mock = Mock::start(|_| Reply::json(429, json!({"error": {"message": "slow"}}))).await;
+    let cap = std::sync::Arc::new(support::Capture::default());
+    let env = env_with_key("UP_KEY", UP_KEY);
+    let gw = TestGateway::start_with_sink(
+        &yaml_for(&mock.url(), "chat", "generic", "", ""),
+        &env,
+        cap.clone(),
+    )
+    .await;
+    let r = gw.post("/v1/messages", &request("claude-x")).await;
+    assert_eq!(r.status, 429);
+    let unauth = reqwest_free_unauthenticated(&gw).await;
+    assert_eq!(unauth, 401);
+    let recs = cap.wait_for(3).await;
+    let rate = recs
+        .iter()
+        .find(|r| r.status == 429 && r.kind == airmate::obs::RecordKind::Request)
+        .unwrap();
+    assert_eq!(rate.error_class.as_deref(), Some("rate_limit_error"));
+    let refused = recs.iter().find(|r| r.status == 401).unwrap();
+    assert_eq!(
+        (refused.client.as_str(), refused.error_class.as_deref()),
+        ("-", Some("authentication_error"))
+    );
+}
+
+async fn reqwest_free_unauthenticated(gw: &TestGateway) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(gw.addr).await.unwrap();
+    s.write_all(
+        format!(
+            "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            gw.addr.port()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).await.unwrap();
+    buf.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}

@@ -8,6 +8,7 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod keychain;
+pub mod obs;
 pub mod router;
 pub mod secret;
 pub mod server;

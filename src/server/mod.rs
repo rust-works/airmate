@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod guard;
+pub mod record;
 pub mod stream;
 pub mod upstream;
 
@@ -28,6 +29,7 @@ use airmate_core::signature::SigningKey;
 use crate::auth::{Authenticator, Identity};
 use crate::config::schema::Config;
 use crate::config::validate::ConfigError;
+use crate::obs::{NullSink, RecordSink};
 use crate::router::ModelTable;
 use crate::secret::{Secret, SecretResolver};
 use guard::{check_host, check_origin, extract_token, GuardConfig};
@@ -126,6 +128,8 @@ pub struct Shared {
     pub guard: GuardConfig,
     /// The global concurrency limit.
     pub permits: Arc<Semaphore>,
+    /// Where request records go.
+    pub log: Arc<dyn RecordSink>,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -175,6 +179,19 @@ impl std::error::Error for BindError {}
 ///
 /// The address is invalid or cannot be bound.
 pub async fn bind(config: &Config, tables: Tables) -> Result<BoundGateway, BindError> {
+    bind_with(config, tables, Arc::new(NullSink)).await
+}
+
+/// Like [`bind`], writing request records to `log`.
+///
+/// # Errors
+///
+/// The address is invalid or cannot be bound.
+pub async fn bind_with(
+    config: &Config,
+    tables: Tables,
+    log: Arc<dyn RecordSink>,
+) -> Result<BoundGateway, BindError> {
     let addr: SocketAddr = format!(
         "{}:{}",
         if config.server.bind.contains(':') {
@@ -205,6 +222,7 @@ pub async fn bind(config: &Config, tables: Tables) -> Result<BoundGateway, BindE
             allowed_hosts: config.server.allowed_hosts.clone(),
         },
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
+        log,
         tables: RwLock::new(Arc::new(tables)),
     });
     Ok(BoundGateway {
@@ -290,16 +308,23 @@ async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody>
     let tables = shared.tables();
     let identity = match run_guard(&shared, &tables, &parts) {
         Ok(id) => id,
-        Err(e) => return error_response(inbound, &e.with_request_id(rid)),
+        Err(e) => {
+            // Refused requests are logged too: they are the interesting ones.
+            let rec = record::Recorder::new(shared.log.clone(), &rid, "-", inbound);
+            rec.finish_response(e.status());
+            return error_response(inbound, &e.with_request_id(rid));
+        }
     };
+    let rec = record::Recorder::new(shared.log.clone(), &rid, &identity.client, inbound);
     let route = Route {
         shared,
         tables,
         identity,
         rid: rid.clone(),
+        rec: rec.clone(),
     };
     let path = parts.uri.path().to_owned();
-    match (parts.method.as_str(), path.as_str()) {
+    let resp = match (parts.method.as_str(), path.as_str()) {
         ("POST", "/v1/messages") => anthropic::messages(route, parts, body).await,
         ("POST", "/v1/messages/count_tokens") => anthropic::count_tokens(route, parts, body).await,
         ("GET", "/v1/models") => anthropic::models(&route, &parts),
@@ -310,7 +335,9 @@ async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody>
             inbound,
             &GatewayError::not_served(&path).with_request_id(rid),
         ),
-    }
+    };
+    rec.finish_response(resp.status().as_u16());
+    resp
 }
 
 /// What a handler knows about the request it is serving.
@@ -323,6 +350,8 @@ pub struct Route {
     pub identity: Identity,
     /// The request id.
     pub rid: String,
+    /// Accumulates the request-log record.
+    pub rec: record::Recorder,
 }
 
 /// Reads a request body, refusing more than `max` bytes.

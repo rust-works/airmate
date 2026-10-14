@@ -190,19 +190,30 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     };
     let target = entry.targets[0].clone();
     let client_model = facts.model.clone();
+    route.rec.model_asked(&client_model);
     let prepared = match prepare(&route, &body, &target, facts) {
         Ok(p) => p,
         Err(e) => return fail(&route, e),
     };
+    route.rec.ignored(&prepared.ignored);
+    route.rec.stream(prepared.request.stream);
     let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
     let permit = match acquire(&route.shared, queue).await {
         Ok(p) => p,
         Err(e) => return fail(&route, e),
     };
+    let sent_at = std::time::Instant::now();
     let resp = match send(&target.upstream, &prepared.request, &parts.headers).await {
         Ok(r) => r,
-        Err(e) => return fail(&route, e.into_gateway(&target.upstream.name)),
+        Err(e) => {
+            let e = e.into_gateway(&target.upstream.name);
+            route.rec.attempt(&target, e.status(), None);
+            return fail(&route, e);
+        }
     };
+    let ttfb = u64::try_from(sent_at.elapsed().as_millis()).ok();
+    route.rec.attempt(&target, resp.status.as_u16(), ttfb);
+    route.rec.first_byte();
     if !resp.status.is_success() {
         let e = error_from_upstream(resp, &target, &prepared).await;
         return fail(&route, e);
@@ -224,6 +235,7 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         };
         match completion {
             Ok(c) => {
+                route.rec.usage(&c.usage);
                 let rctx = RenderCtx {
                     model: client_model,
                     message_id: message_id(),
@@ -250,7 +262,9 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
             }
         }
     } else {
-        passthrough::rewrite_response(&bytes, &client_model).0
+        let (rewritten, summary) = passthrough::rewrite_response(&bytes, &client_model);
+        route.rec.usage(&summary.usage);
+        rewritten
     };
     json_ok(&route, out, &headers)
 }
@@ -322,6 +336,8 @@ async fn stream_response(
     } else {
         Pipe::Passthrough(PassthroughStream::new(&client_model))
     };
+    route.rec.defer();
+    let rec = route.rec.clone();
     let stream = StreamBody::new(
         body,
         &first,
@@ -329,7 +345,7 @@ async fn stream_response(
         Duration::from_secs(up.timeouts.idle_secs),
         Duration::from_secs(config.server.keepalive_secs),
         Some(permit),
-        None,
+        Some(Box::new(move |summary| rec.finish_stream(&summary))),
     );
     let mut b = Response::builder()
         .status(200)

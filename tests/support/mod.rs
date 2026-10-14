@@ -22,8 +22,9 @@ use tokio::sync::{mpsc, watch};
 
 use airmate::config::paths::EnvFn;
 use airmate::config::{load_str, Config};
+use airmate::obs::{RecordSink, RequestRecord};
 use airmate::secret::{Secret, SystemResolver};
-use airmate::server::{bind, Tables};
+use airmate::server::{bind_with, Tables};
 
 /// A request the mock saw.
 #[derive(Debug, Clone)]
@@ -323,6 +324,10 @@ impl TestGateway {
     }
 
     pub async fn start_with_env(yaml: &str, env: EnvFn<'_>) -> Self {
+        Self::start_with_sink(yaml, env, Arc::new(airmate::obs::NullSink)).await
+    }
+
+    pub async fn start_with_sink(yaml: &str, env: EnvFn<'_>, sink: Arc<dyn RecordSink>) -> Self {
         let mut config = load_str(yaml, None).unwrap_or_else(|e| panic!("bad test config:\n{e}"));
         config.server.port = 0;
         let token = "test-gateway-token".to_owned();
@@ -332,7 +337,7 @@ impl TestGateway {
             &Secret::new(token.clone()),
         )
         .unwrap_or_else(|e| panic!("tables: {e:?}"));
-        let gw = bind(&config, tables).await.unwrap();
+        let gw = bind_with(&config, tables, sink).await.unwrap();
         let addr = gw.local_addr();
         let shared = gw.shared();
         let (shutdown, rx) = watch::channel(false);
@@ -432,4 +437,31 @@ pub fn env_with_key(
     value: &'static str,
 ) -> impl Fn(&str) -> Option<String> + Send + Sync {
     move |n| (n == name).then(|| value.to_owned())
+}
+
+/// Collects request-log records.
+#[derive(Default)]
+pub struct Capture(pub Mutex<Vec<RequestRecord>>);
+
+impl RecordSink for Capture {
+    fn record(&self, rec: &RequestRecord) {
+        self.0.lock().unwrap().push(rec.clone());
+    }
+}
+
+impl Capture {
+    pub fn all(&self) -> Vec<RequestRecord> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Waits until at least `n` records have been written.
+    pub async fn wait_for(&self, n: usize) -> Vec<RequestRecord> {
+        for _ in 0..100 {
+            if self.all().len() >= n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        self.all()
+    }
 }

@@ -482,3 +482,51 @@ async fn a_responses_stream_with_reasoning_and_a_tool_call() {
     assert!(text.contains("\"stop_reason\":\"tool_use\""));
     assert_eq!(mock.recorded()[0].json()["reasoning"]["effort"], "medium");
 }
+
+#[tokio::test]
+async fn a_streamed_request_is_logged_when_the_stream_ends_with_its_usage() {
+    let mock = Mock::start(|_| Reply::sse(text_stream())).await;
+    let cap = std::sync::Arc::new(support::Capture::default());
+    let yaml = yaml_for(&mock.url(), "chat", "generic", "", "");
+    let gw = TestGateway::start_with_sink(&yaml, &env_with_key("UP_KEY", "k"), cap.clone()).await;
+    let r = gw.post("/v1/messages", &request(true)).await;
+    assert_eq!(r.status, 200);
+    let recs = cap.wait_for(2).await;
+    let rec = recs
+        .iter()
+        .find(|r| r.kind == airmate::obs::RecordKind::Request)
+        .unwrap();
+    assert!(rec.stream && rec.error_class.is_none());
+    assert_eq!((rec.input_tokens, rec.output_tokens), (7, 2));
+}
+
+#[tokio::test]
+async fn a_cancelled_stream_is_logged_as_client_closed() {
+    let mock = Mock::start(|_| {
+        Reply::sse(vec![
+            chunk(json!({"role": "assistant", "content": "x"}), None),
+            Part::Hang,
+        ])
+    })
+    .await;
+    let cap = std::sync::Arc::new(support::Capture::default());
+    let yaml = yaml_for(&mock.url(), "chat", "generic", "", "");
+    let gw = TestGateway::start_with_sink(&yaml, &env_with_key("UP_KEY", "k"), cap.clone()).await;
+    let mut s = tokio::net::TcpStream::connect(gw.addr).await.unwrap();
+    let body = request(true).to_string();
+    s.write_all(
+        format!("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nx-api-key: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", gw.addr.port(), gw.token, body.len(), body)
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf = [0u8; 1024];
+    let _ = s.read(&mut buf).await.unwrap();
+    drop(s);
+    let recs = cap.wait_for(2).await;
+    let rec = recs
+        .iter()
+        .find(|r| r.kind == airmate::obs::RecordKind::Request)
+        .expect("the request is logged");
+    assert_eq!(rec.error_class.as_deref(), Some("client_closed_request"));
+}

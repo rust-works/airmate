@@ -7,8 +7,9 @@ use tokio::sync::watch;
 
 use super::common::{gateway_token, load, CliError, Global, Process};
 use crate::config::overrides::Overrides;
+use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
 use crate::secret::SystemResolver;
-use crate::server::{bind, Tables};
+use crate::server::{bind_with, Tables};
 
 /// Runs the gateway until interrupted.
 ///
@@ -30,12 +31,13 @@ pub fn serve(
     for w in &warnings {
         let _ = writeln!(err, "airmate: warning: {w}");
     }
+    let sink = request_log(&config, &loaded.dirs.request_log(), err);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| CliError::runtime(format!("cannot start the async runtime: {e}")))?;
     rt.block_on(async {
-        let gw = bind(&config, tables)
+        let gw = bind_with(&config, tables, sink.clone())
             .await
             .map_err(|e| CliError::runtime(e.to_string()))?;
         let _ = writeln!(
@@ -80,4 +82,31 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Opens the request log if the configuration asks for one; a log that cannot be opened is
+/// reported and skipped, since logging must never stop the gateway from serving.
+fn request_log(
+    config: &crate::config::schema::Config,
+    path: &std::path::Path,
+    err: &mut dyn Write,
+) -> Arc<dyn RecordSink> {
+    if !config.log.requests {
+        return Arc::new(NullSink);
+    }
+    let rotation = config.log.rotate.map(|r| Rotation {
+        max_bytes: r.max_size_mb * 1024 * 1024,
+        keep: r.keep,
+    });
+    match JsonlLog::open(path, rotation) {
+        Ok(log) => Arc::new(log),
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "airmate: warning: cannot open the request log {}: {e}",
+                path.display()
+            );
+            Arc::new(NullSink)
+        }
+    }
 }
