@@ -4,3 +4,5 @@
 //! here is a pure function or a state machine driven by the caller.
 
 #![forbid(unsafe_code)]
+
+pub mod ir;
