@@ -67,7 +67,7 @@ pub struct RuleCtx<'a> {
     /// The authenticated client.
     pub client: &'a str,
     /// Looks up an allow-listed request header.
-    pub header: &'a dyn Fn(&str) -> Option<String>,
+    pub header: &'a (dyn Fn(&str) -> Option<String> + Sync),
     /// The hour of the day, UTC.
     pub hour: u8,
 }
@@ -446,7 +446,7 @@ mod tests {
         }
     }
 
-    fn ctx<'a>(f: &'a Facts, h: &'a dyn Fn(&str) -> Option<String>) -> RuleCtx<'a> {
+    fn ctx<'a>(f: &'a Facts, h: &'a (dyn Fn(&str) -> Option<String> + Sync)) -> RuleCtx<'a> {
         RuleCtx {
             facts: f,
             client: "x",

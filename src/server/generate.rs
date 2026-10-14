@@ -2,17 +2,21 @@
 //! and `/v1/responses`.
 //!
 //! The flow is the same whatever the client speaks: read the body, peek at what routing needs,
-//! resolve the model, prepare the upstream request (a passthrough when both sides speak the same
-//! protocol, a translation otherwise), call the upstream, and send the answer back in the client's
-//! protocol.
+//! plan a route (rules, model resolution, capability filtering, strategy, affinity), then try the
+//! targets in order. An *attempt* is one call to one target. A retryable failure retries the same
+//! target (with backoff) or moves to the next; a non-retryable one is returned at once, since a
+//! bad request does not become good by trying another provider. Once the first byte of a stream
+//! has been sent there is no failover: the answer is a single upstream's.
 
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::http::request::Parts;
 use hyper::Response;
+use tokio::sync::OwnedSemaphorePermit;
 
 use airmate_core::adapters;
 use airmate_core::error::{ErrorKind, GatewayError, SizeInfo, UpstreamLabel};
@@ -22,13 +26,15 @@ use airmate_core::ir::{IrRequest, Protocol};
 use airmate_core::outbound::anthropic::PassthroughStream;
 use airmate_core::outbound::json_passthrough::{self, JsonPassthroughStream};
 use airmate_core::outbound::{anthropic as passthrough, ParseCtx, UpstreamError, UpstreamRequest};
-use airmate_core::policy::{ignored_header, Ignored, PolicyConfig};
+use airmate_core::policy::{ignored_header, Ignored, Parsed, PolicyConfig};
 use airmate_core::stream::anthropic_render::RenderCtx;
 
 use super::stream::{Pipe, StreamBody};
-use super::upstream::{retry_after, send, UpstreamResponse};
+use super::upstream::{retry_after, send};
 use super::{acquire, error_response, full, read_body, GwBody, Route};
-use crate::router::{Resolution, RouteTarget};
+use crate::router::catalog::{Skip, SkipReason};
+use crate::router::engine::{exhausted, plan, PlanInput, Planned};
+use crate::router::RouteTarget;
 
 /// Seconds since the Unix epoch.
 #[must_use]
@@ -38,8 +44,23 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// An error response, with the routing headers when there are any.
+pub(super) fn fail_with(
+    route: &Route,
+    e: GatewayError,
+    extra: &[(&'static str, String)],
+) -> Response<GwBody> {
+    let mut resp = error_response(route.inbound, &e.with_request_id(route.rid.clone()));
+    for (k, v) in extra {
+        if let Ok(v) = hyper::header::HeaderValue::from_str(v) {
+            resp.headers_mut().insert(*k, v);
+        }
+    }
+    resp
+}
+
 pub(super) fn fail(route: &Route, e: GatewayError) -> Response<GwBody> {
-    error_response(route.inbound, &e.with_request_id(route.rid.clone()))
+    fail_with(route, e, &[])
 }
 
 pub(super) fn json_ok(route: &Route, body: Vec<u8>, extra: &[(&str, String)]) -> Response<GwBody> {
@@ -62,13 +83,17 @@ fn message_id() -> String {
     )
 }
 
-/// Resolves the model name to an entry with at least one target.
+/// Resolves the model name to an entry with at least one target (used by `count_tokens`).
 pub(super) fn resolve(
     route: &Route,
     model: &str,
 ) -> Result<std::sync::Arc<crate::router::ModelEntry>, GatewayError> {
     match route.tables.models.resolve(model, route.inbound) {
-        Resolution::Entry(e) | Resolution::Direct(e) if !e.targets.is_empty() => Ok(e),
+        crate::router::Resolution::Entry(e) | crate::router::Resolution::Direct(e)
+            if !e.targets.is_empty() =>
+        {
+            Ok(e)
+        }
         _ => Err(GatewayError::new(
             ErrorKind::NotFound,
             format!("the model `{model}` is not mapped to an upstream model; see `airmate models`"),
@@ -79,7 +104,7 @@ pub(super) fn resolve(
 /// How a request is sent on.
 enum Mode {
     /// Parsed into the IR and translated.
-    Translate(Box<IrRequest>),
+    Translate,
     /// Forwarded as sent (Anthropic).
     PassAnthropic,
     /// Forwarded as sent (Chat or Responses); the flag is whether the client wanted stream usage.
@@ -89,65 +114,84 @@ enum Mode {
 struct Prepared {
     request: UpstreamRequest,
     mode: Mode,
-    facts: Facts,
     ignored: Vec<Ignored>,
+}
+
+/// The inbound request, parsed at most once however many targets are tried.
+struct Source<'a> {
+    body: &'a Bytes,
+    facts: &'a Facts,
+    parsed: OnceLock<Result<Parsed<IrRequest>, GatewayError>>,
+}
+
+impl Source<'_> {
+    fn ir(&self, route: &Route) -> Result<&Parsed<IrRequest>, GatewayError> {
+        let config = &route.tables.config;
+        self.parsed
+            .get_or_init(|| {
+                let ctx = InboundCtx {
+                    policy: PolicyConfig {
+                        unknown_fields: config.server.unknown_fields.into(),
+                    },
+                    signing_key: Some(&route.tables.signing_key),
+                    count_tokens: false,
+                };
+                adapters::parse_request(route.inbound, self.body, &ctx)
+                    .map_err(|e| GatewayError::from_policy(&e))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
 }
 
 fn prepare(
     route: &Route,
-    body: &Bytes,
+    src: &Source<'_>,
     target: &RouteTarget,
-    facts: Facts,
+    effective_cap: Option<u32>,
 ) -> Result<Prepared, GatewayError> {
     let config = &route.tables.config;
-    let core = target.core_target(config.server.think_tags);
+    let mut core = target.core_target(config.server.think_tags);
+    core.max_output_tokens_cap = match (core.max_output_tokens_cap, effective_cap) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     let policy = |e: airmate_core::policy::PolicyError| GatewayError::from_policy(&e);
     if core.protocol == route.inbound {
         return match route.inbound {
             Protocol::Anthropic => {
-                let request = passthrough::build_passthrough(body, &core).map_err(policy)?;
+                let request = passthrough::build_passthrough(src.body, &core).map_err(policy)?;
                 let ignored = request.ignored.clone();
                 Ok(Prepared {
                     request,
                     mode: Mode::PassAnthropic,
-                    facts,
                     ignored,
                 })
             }
             p => {
-                let (request, wants) = json_passthrough::build(body, &core, p).map_err(policy)?;
+                let (request, wants) =
+                    json_passthrough::build(src.body, &core, p).map_err(policy)?;
                 Ok(Prepared {
                     request,
                     mode: Mode::PassJson {
                         client_wants_usage: wants,
                     },
-                    facts,
                     ignored: Vec::new(),
                 })
             }
         };
     }
-    let ctx = InboundCtx {
-        policy: PolicyConfig {
-            unknown_fields: config.server.unknown_fields.into(),
-        },
-        signing_key: Some(&route.tables.signing_key),
-        count_tokens: false,
-    };
-    let parsed = adapters::parse_request(route.inbound, body, &ctx).map_err(policy)?;
-    let ir = parsed.value;
-    let request = adapters::build_request(&ir, &core).map_err(policy)?;
-    let mut ignored = parsed.ignored;
+    let parsed = src.ir(route)?;
+    let request = adapters::build_request(&parsed.value, &core).map_err(policy)?;
+    let mut ignored = parsed.ignored.clone();
     for i in &request.ignored {
         if !ignored.iter().any(|x| x.name == i.name) {
             ignored.push(i.clone());
         }
     }
-    let facts = Facts::from_ir(&ir);
     Ok(Prepared {
         request,
-        mode: Mode::Translate(Box::new(ir)),
-        facts,
+        mode: Mode::Translate,
         ignored,
     })
 }
@@ -159,24 +203,12 @@ pub(super) fn label(t: &RouteTarget) -> UpstreamLabel<'_> {
     }
 }
 
-fn size_of(p: &Prepared) -> SizeInfo {
+fn size_of(f: &Facts, window: Option<u64>) -> SizeInfo {
     SizeInfo {
-        context_window: None,
-        est_input_tokens: p.facts.est_input_tokens,
-        max_tokens: p.facts.max_tokens,
+        context_window: window,
+        est_input_tokens: f.est_input_tokens,
+        max_tokens: f.max_tokens,
     }
-}
-
-async fn error_from_upstream(
-    resp: UpstreamResponse,
-    target: &RouteTarget,
-    p: &Prepared,
-) -> GatewayError {
-    let status = resp.status.as_u16();
-    let retry = retry_after(&resp.headers);
-    let body = collect(resp.body, 1 << 20).await.unwrap_or_default();
-    let e = UpstreamError::from_response(status, &body);
-    GatewayError::from_upstream(&e, label(target), size_of(p), retry)
 }
 
 pub(super) async fn collect(body: Incoming, max: usize) -> Result<Bytes, GatewayError> {
@@ -214,98 +246,60 @@ fn render_ctx(
     }
 }
 
-/// `POST /v1/messages`, `/v1/chat/completions` and `/v1/responses`.
-pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<GwBody> {
-    let config = route.tables.config.clone();
-    let body = match read_body(body, &parts.headers, config.server.max_body_bytes).await {
-        Ok(b) => b,
-        Err(e) => return fail(&route, e),
-    };
-    let facts = match adapters::peek(route.inbound, &body) {
-        Ok(f) => f,
-        Err(e) => return fail(&route, GatewayError::from_policy(&e)),
-    };
-    let entry = match resolve(&route, &facts.model) {
-        Ok(e) => e,
-        Err(e) => return fail(&route, e),
-    };
-    let target = entry.targets[0].clone();
-    let client_model = facts.model.clone();
-    route.rec.model_asked(&client_model);
-    let prepared = match prepare(&route, &body, &target, facts) {
-        Ok(p) => p,
-        Err(e) => return fail(&route, e),
-    };
-    route.rec.ignored(&prepared.ignored);
-    route.rec.stream(prepared.request.stream);
-    let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
-    let permit = match acquire(&route.shared, queue).await {
-        Ok(p) => p,
-        Err(e) => return fail(&route, e),
-    };
-    let sent_at = std::time::Instant::now();
-    let resp = match send(&target.upstream, &prepared.request, &parts.headers).await {
-        Ok(r) => r,
-        Err(e) => {
-            let e = e.into_gateway(&target.upstream.name);
-            route.rec.attempt(&target, e.status(), None);
-            return fail(&route, e);
-        }
-    };
-    route.rec.attempt(
-        &target,
-        resp.status.as_u16(),
-        u64::try_from(sent_at.elapsed().as_millis()).ok(),
-    );
-    route.rec.first_byte();
-    if !resp.status.is_success() {
-        let e = error_from_upstream(resp, &target, &prepared).await;
-        return fail(&route, e);
-    }
-    if prepared.request.stream {
-        return stream_response(&route, resp, &target, &prepared, client_model, permit).await;
-    }
-    let bytes = match collect(resp.body, 256 << 20).await {
-        Ok(b) => b,
-        Err(e) => return fail(&route, e),
-    };
-    let headers = reply_headers(&target, &prepared.ignored);
-    let out = match &prepared.mode {
-        Mode::Translate(ir) => {
-            let core = target.core_target(config.server.think_tags);
-            let ctx = ParseCtx::new(&core, &prepared.request);
-            match adapters::parse_response(core.protocol, 200, &bytes, &ctx) {
-                Ok(c) => {
-                    route.rec.usage(&c.usage);
-                    let rctx =
-                        render_ctx(&route, &target, Some(ir), &prepared.facts, &client_model);
-                    adapters::render_response_for(route.inbound, &c, &rctx)
-                }
-                Err(e) => {
-                    return fail(
-                        &route,
-                        GatewayError::from_upstream(&e, label(&target), size_of(&prepared), None),
-                    )
-                }
-            }
-        }
-        Mode::PassAnthropic => {
-            let (rewritten, summary) = passthrough::rewrite_response(&bytes, &client_model);
-            route.rec.usage(&summary.usage);
-            rewritten
-        }
-        Mode::PassJson { .. } => {
-            let (rewritten, usage) =
-                json_passthrough::rewrite_response(&bytes, &client_model, route.inbound);
-            route.rec.usage(&usage);
-            rewritten
-        }
-    };
-    json_ok(&route, out, &headers)
+// ---- attempts -------------------------------------------------------------------------------
+
+/// Why an attempt failed and what to do about it.
+struct Failure {
+    error: GatewayError,
+    /// May the next target (or the same one again) be tried?
+    retryable: bool,
+    /// The upstream rejected its key: open the circuit and alert.
+    auth: bool,
+    /// A `Retry-After` the upstream gave, in seconds.
+    retry_after: Option<u64>,
+    /// The HTTP status seen, or the status the failure maps to.
+    status: u16,
 }
 
-/// Waits for the first upstream data frame: a failure before the first byte is still an error
-/// response, not a broken stream.
+fn classify_status(status: u16) -> (bool, bool) {
+    match status {
+        401 | 403 => (true, true),
+        408 | 429 | 500..=599 => (true, false),
+        _ => (false, false),
+    }
+}
+
+fn from_gateway(error: GatewayError) -> Failure {
+    let status = error.status();
+    Failure {
+        error,
+        retryable: true,
+        auth: false,
+        retry_after: None,
+        status,
+    }
+}
+
+/// Releases a half-open breaker's probe if the attempt is abandoned (the client went away).
+struct ProbeGuard<'a> {
+    planned: &'a Planned,
+    armed: bool,
+}
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.planned.state.breaker.release_probe();
+        }
+    }
+}
+
+/// The answer from a successful attempt, ready to be turned into a response.
+enum Delivered {
+    Complete { bytes: Bytes },
+    Streaming { body: Incoming, first: Bytes },
+}
+
 async fn first_chunk(body: &mut Incoming, wait: Duration) -> Result<Bytes, GatewayError> {
     let read = async {
         loop {
@@ -334,73 +328,570 @@ async fn first_chunk(body: &mut Incoming, wait: Duration) -> Result<Bytes, Gatew
     }
 }
 
-async fn stream_response(
+/// One call to one target, up to the point where a stream's first byte (or a whole reply) has
+/// arrived.
+async fn attempt(
     route: &Route,
-    resp: UpstreamResponse,
-    target: &RouteTarget,
+    parts: &Parts,
+    planned: &Planned,
     prepared: &Prepared,
-    client_model: String,
-    permit: tokio::sync::OwnedSemaphorePermit,
-) -> Response<GwBody> {
-    let config = &route.tables.config;
-    let up = &target.upstream;
-    let mut body = resp.body;
-    let first = match first_chunk(&mut body, Duration::from_secs(up.timeouts.first_byte_secs)).await
-    {
-        Ok(b) => b,
-        Err(e) => return fail(route, e),
-    };
-    let core = target.core_target(config.server.think_tags);
-    let pipe = match &prepared.mode {
-        Mode::Translate(ir) => {
-            let parser =
-                adapters::stream_parser(core.protocol, ParseCtx::new(&core, &prepared.request));
-            let render = adapters::stream_renderer(
-                route.inbound,
-                render_ctx(route, target, Some(ir), &prepared.facts, &client_model),
-            );
-            Pipe::translate(parser, render)
+    facts: &Facts,
+) -> Result<(Delivered, Duration), Failure> {
+    let target = &planned.target;
+    let started = Instant::now();
+    let resp = match send(&target.upstream, &prepared.request, &parts.headers).await {
+        Ok(r) => r,
+        Err(e) => {
+            let error = e.into_gateway(&target.upstream.name);
+            route.rec.attempt(target, error.status(), None);
+            return Err(from_gateway(error));
         }
-        Mode::PassAnthropic => Pipe::Passthrough(PassthroughStream::new(&client_model)),
-        Mode::PassJson { client_wants_usage } => Pipe::Json(JsonPassthroughStream::new(
-            route.inbound,
-            &client_model,
-            *client_wants_usage,
-        )),
     };
-    route.rec.defer();
-    let rec = route.rec.clone();
-    let stream = StreamBody::new(
-        body,
-        &first,
-        pipe,
-        Duration::from_secs(up.timeouts.idle_secs),
-        Duration::from_secs(config.server.keepalive_secs),
-        Some(permit),
-        Some(Box::new(move |summary| rec.finish_stream(&summary))),
-    );
-    let mut b = Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .header("request-id", &route.rid);
-    for (k, v) in reply_headers(target, &prepared.ignored) {
-        b = b.header(k, v);
+    let status = resp.status.as_u16();
+    if !resp.status.is_success() {
+        let retry = retry_after(&resp.headers);
+        let body = collect(resp.body, 1 << 20).await.unwrap_or_default();
+        route.rec.attempt(
+            target,
+            status,
+            u64::try_from(started.elapsed().as_millis()).ok(),
+        );
+        let e = UpstreamError::from_response(status, &body);
+        let (retryable, auth) = classify_status(status);
+        return Err(Failure {
+            error: GatewayError::from_upstream(
+                &e,
+                label(target),
+                size_of(facts, planned.caps.context_window),
+                retry,
+            ),
+            retryable,
+            auth,
+            retry_after: retry,
+            status,
+        });
     }
-    b.body(stream.boxed_unsync()).expect("a valid response")
+    let mut body = resp.body;
+    if prepared.request.stream {
+        let wait = Duration::from_secs(target.upstream.timeouts.first_byte_secs);
+        return match first_chunk(&mut body, wait).await {
+            Ok(first) => {
+                let ttfb = started.elapsed();
+                route
+                    .rec
+                    .attempt(target, status, u64::try_from(ttfb.as_millis()).ok());
+                Ok((Delivered::Streaming { body, first }, ttfb))
+            }
+            Err(e) => {
+                route.rec.attempt(target, e.status(), None);
+                Err(from_gateway(e))
+            }
+        };
+    }
+    match collect(body, 256 << 20).await {
+        Ok(bytes) => {
+            let ttfb = started.elapsed();
+            route
+                .rec
+                .attempt(target, status, u64::try_from(ttfb.as_millis()).ok());
+            Ok((Delivered::Complete { bytes }, ttfb))
+        }
+        Err(e) => {
+            route.rec.attempt(target, 502, None);
+            Err(from_gateway(GatewayError::new(
+                ErrorKind::BadGateway,
+                e.message,
+            )))
+        }
+    }
 }
 
-pub(super) fn reply_headers(
-    target: &RouteTarget,
+/// Exponential backoff with full jitter: a random wait up to `min(cap, base * 2^n)`.
+fn backoff(n: u32, base_ms: u64, cap_ms: u64, unit: f64) -> Duration {
+    let ceiling = base_ms.saturating_mul(1u64 << n.min(20)).min(cap_ms);
+    Duration::from_millis((ceiling as f64 * unit) as u64)
+}
+
+fn skipped_header(skipped: &[Skip]) -> Option<String> {
+    (!skipped.is_empty()).then(|| {
+        skipped
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
+fn routing_headers(
+    route: &crate::router::engine::Route,
+    target: Option<&RouteTarget>,
+    attempts: u32,
+    skipped: &[Skip],
     ignored: &[Ignored],
 ) -> Vec<(&'static str, String)> {
-    let mut h = vec![
-        ("x-airmate-upstream", target.upstream.name.clone()),
-        ("x-airmate-upstream-model", target.model.clone()),
-        ("x-airmate-attempts", "1".to_owned()),
-    ];
+    let mut h = vec![("x-airmate-attempts", attempts.to_string())];
+    if let Some(t) = target {
+        h.push(("x-airmate-upstream", t.upstream.name.clone()));
+        h.push(("x-airmate-upstream-model", t.model.clone()));
+    }
+    if let Some(v) = skipped_header(skipped) {
+        h.push(("x-airmate-skipped", v));
+    }
+    if let Some(r) = &route.rule {
+        h.push(("x-airmate-rule", r.clone()));
+    }
     if let Some(v) = ignored_header(ignored) {
         h.push(("x-airmate-ignored", v));
     }
     h
+}
+
+/// `POST /v1/messages`, `/v1/chat/completions` and `/v1/responses`.
+pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<GwBody> {
+    let config = route.tables.config.clone();
+    let body = match read_body(body, &parts.headers, config.server.max_body_bytes).await {
+        Ok(b) => b,
+        Err(e) => return fail(&route, e),
+    };
+    let facts = match adapters::peek(route.inbound, &body) {
+        Ok(f) => f,
+        Err(e) => return fail(&route, GatewayError::from_policy(&e)),
+    };
+    route.rec.model_asked(&facts.model);
+    route.rec.stream(facts.stream);
+
+    // Plan the route: rules, resolution, capability filtering, strategy, affinity.
+    let allowed: Vec<String> = config
+        .server
+        .rule_headers
+        .iter()
+        .map(|h| h.to_ascii_lowercase())
+        .collect();
+    let header = |name: &str| -> Option<String> {
+        let name = name.to_ascii_lowercase();
+        allowed
+            .contains(&name)
+            .then(|| {
+                parts
+                    .headers
+                    .get(&name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .flatten()
+    };
+    let planned = match plan(
+        &route.tables.models,
+        &route.tables.rules,
+        &route.tables.catalog,
+        &route.shared.router,
+        &config,
+        &PlanInput {
+            facts: &facts,
+            client: &route.identity.client,
+            body: &body,
+            header: &header,
+        },
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => return fail(&route, e),
+    };
+    route.rec.rule(planned.rule.as_deref());
+    let mut skipped = planned.skipped.clone();
+
+    let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
+    let permit = match acquire(&route.shared, queue).await {
+        Ok(p) => p,
+        Err(e) => return fail(&route, e),
+    };
+
+    let state = &route.shared.router;
+    let failover = config.failover;
+    let started = Instant::now();
+    let budget = Duration::from_secs(failover.total_secs);
+    let source = Source {
+        body: &body,
+        facts: &facts,
+        parsed: OnceLock::new(),
+    };
+    let mut attempts: u32 = 0;
+    let mut last: Option<Failure> = None;
+    let mut ignored_so_far: Vec<Ignored> = Vec::new();
+
+    'targets: for planned_target in &planned.targets {
+        let target = &planned_target.target;
+        let label = target.label();
+        // State that changes while requests are in flight is checked now, not at planning time.
+        if planned_target.health.is_unhealthy() {
+            skipped.push(Skip {
+                target: label,
+                reason: SkipReason::Unhealthy,
+            });
+            continue;
+        }
+        if planned_target.state.is_cooling(state.clock.now()) {
+            skipped.push(Skip {
+                target: label,
+                reason: SkipReason::CoolingDown,
+            });
+            continue;
+        }
+        let admit = planned_target.state.breaker.try_acquire(state.clock.now());
+        if !admit.allowed() {
+            skipped.push(Skip {
+                target: label,
+                reason: SkipReason::CircuitOpen,
+            });
+            continue;
+        }
+        let mut guard = ProbeGuard {
+            planned: planned_target,
+            armed: matches!(admit, crate::router::breaker::Admit::Probe),
+        };
+        let slot: Option<OwnedSemaphorePermit> = match &target.upstream.slots {
+            Some(s) => match s.clone().try_acquire_owned() {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    skipped.push(Skip {
+                        target: label,
+                        reason: SkipReason::Concurrency,
+                    });
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let effective_cap = planned_target.caps.max_output_tokens;
+        let prepared = match prepare(&route, &source, target, effective_cap) {
+            Ok(p) => p,
+            // A request this target cannot take, or one that cannot be parsed, is the client's to fix.
+            Err(e) => {
+                guard.armed = false;
+                planned_target.state.breaker.release_probe();
+                route
+                    .rec
+                    .skipped(&skipped.iter().map(ToString::to_string).collect::<Vec<_>>());
+                return fail_with(&route, e, &[("x-airmate-attempts", attempts.to_string())]);
+            }
+        };
+        for ig in &prepared.ignored {
+            if !ignored_so_far.iter().any(|x| x.name == ig.name) {
+                ignored_so_far.push(ig.clone());
+            }
+        }
+        route.rec.ignored(&ignored_so_far);
+
+        let mut retry = 0;
+        loop {
+            if attempts >= failover.max_attempts || started.elapsed() >= budget {
+                break 'targets;
+            }
+            attempts += 1;
+            planned_target
+                .state
+                .inflight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = attempt(&route, &parts, planned_target, &prepared, &facts).await;
+            planned_target
+                .state
+                .inflight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            match outcome {
+                Ok((delivered, ttfb)) => {
+                    guard.armed = false;
+                    planned_target.state.breaker.on_success();
+                    planned_target.state.record_ttfb(ttfb);
+                    if let Some(key) = &planned.affinity_key {
+                        state.affinity_put(key, &target.label());
+                    }
+                    route.rec.first_byte();
+                    route
+                        .rec
+                        .skipped(&skipped.iter().map(ToString::to_string).collect::<Vec<_>>());
+                    let headers = routing_headers(
+                        &planned,
+                        Some(target),
+                        attempts,
+                        &skipped,
+                        &prepared.ignored,
+                    );
+                    return finish(
+                        &route,
+                        delivered,
+                        planned_target,
+                        &prepared,
+                        &source,
+                        headers,
+                        permit,
+                        slot,
+                    )
+                    .await;
+                }
+                Err(f) => {
+                    let now = state.clock.now();
+                    if !f.retryable {
+                        // The upstream answered sensibly; the request is what is wrong.
+                        guard.armed = false;
+                        planned_target.state.breaker.on_success();
+                        route
+                            .rec
+                            .skipped(&skipped.iter().map(ToString::to_string).collect::<Vec<_>>());
+                        let headers =
+                            routing_headers(&planned, Some(target), attempts, &skipped, &[]);
+                        return fail_with(&route, f.error, &headers);
+                    }
+                    guard.armed = false;
+                    if f.auth {
+                        // The key is wrong; hammering it is harmful. Open the circuit and tell the operator.
+                        planned_target.state.breaker.trip(now, &f.error.message);
+                        state
+                            .auth_alerts
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        eprintln!(
+                            "airmate: alert: {} rejected its API key (HTTP {}); check {}",
+                            target.upstream.name, f.status, target.upstream.key_setting
+                        );
+                    } else {
+                        planned_target
+                            .state
+                            .breaker
+                            .on_failure(now, &f.error.message);
+                    }
+                    let wait_for = f.retry_after;
+                    last = Some(f);
+                    if last.as_ref().is_some_and(|f| f.auth) {
+                        continue 'targets;
+                    }
+                    // A pause longer than the router will wait: mark the target and fail over.
+                    if let Some(secs) = wait_for {
+                        if secs > failover.retry_after_ceiling_secs {
+                            planned_target
+                                .state
+                                .cool_until(now + Duration::from_secs(secs));
+                            continue 'targets;
+                        }
+                    }
+                    if retry < failover.retries {
+                        let mut wait = backoff(
+                            retry,
+                            failover.backoff_base_ms,
+                            failover.backoff_cap_ms,
+                            state.random.unit(),
+                        );
+                        if let Some(secs) = wait_for {
+                            wait = wait.max(Duration::from_secs(secs));
+                        }
+                        retry += 1;
+                        if started.elapsed() + wait >= budget {
+                            break 'targets;
+                        }
+                        tokio::time::sleep(wait).await;
+                        // The breaker may have opened while we waited.
+                        if !planned_target
+                            .state
+                            .breaker
+                            .try_acquire(state.clock.now())
+                            .allowed()
+                        {
+                            skipped.push(Skip {
+                                target: target.label(),
+                                reason: SkipReason::CircuitOpen,
+                            });
+                            continue 'targets;
+                        }
+                        continue;
+                    }
+                    continue 'targets;
+                }
+            }
+        }
+    }
+
+    route
+        .rec
+        .skipped(&skipped.iter().map(ToString::to_string).collect::<Vec<_>>());
+    let headers = routing_headers(&planned, None, attempts, &skipped, &[]);
+    match last {
+        Some(f) => fail_with(&route, f.error, &headers),
+        None => fail_with(&route, exhausted(&planned.entry_name, &skipped), &headers),
+    }
+}
+
+/// Turns a delivered answer into the response for the client.
+#[allow(clippy::too_many_arguments)]
+async fn finish(
+    route: &Route,
+    delivered: Delivered,
+    planned: &Planned,
+    prepared: &Prepared,
+    source: &Source<'_>,
+    headers: Vec<(&'static str, String)>,
+    permit: OwnedSemaphorePermit,
+    slot: Option<OwnedSemaphorePermit>,
+) -> Response<GwBody> {
+    let config = &route.tables.config;
+    let target = &planned.target;
+    let client_model = source.facts.model.clone();
+    let ir = match prepared.mode {
+        Mode::Translate => source.ir(route).ok().map(|p| &p.value),
+        _ => None,
+    };
+    match delivered {
+        Delivered::Complete { bytes } => {
+            let out = match &prepared.mode {
+                Mode::Translate => {
+                    let core = target.core_target(config.server.think_tags);
+                    let ctx = ParseCtx::new(&core, &prepared.request);
+                    match adapters::parse_response(core.protocol, 200, &bytes, &ctx) {
+                        Ok(c) => {
+                            route.rec.usage(&c.usage);
+                            let rctx = render_ctx(route, target, ir, source.facts, &client_model);
+                            adapters::render_response_for(route.inbound, &c, &rctx)
+                        }
+                        Err(e) => {
+                            let size = size_of(source.facts, planned.caps.context_window);
+                            return fail_with(
+                                route,
+                                GatewayError::from_upstream(&e, label(target), size, None),
+                                &headers,
+                            );
+                        }
+                    }
+                }
+                Mode::PassAnthropic => {
+                    let (rewritten, summary) = passthrough::rewrite_response(&bytes, &client_model);
+                    route.rec.usage(&summary.usage);
+                    rewritten
+                }
+                Mode::PassJson { .. } => {
+                    let (rewritten, usage) =
+                        json_passthrough::rewrite_response(&bytes, &client_model, route.inbound);
+                    route.rec.usage(&usage);
+                    rewritten
+                }
+            };
+            drop((permit, slot));
+            json_ok(
+                route,
+                out,
+                &headers
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        Delivered::Streaming { body, first } => {
+            let core = target.core_target(config.server.think_tags);
+            let pipe = match &prepared.mode {
+                Mode::Translate => {
+                    let parser = adapters::stream_parser(
+                        core.protocol,
+                        ParseCtx::new(&core, &prepared.request),
+                    );
+                    let render = adapters::stream_renderer(
+                        route.inbound,
+                        render_ctx(route, target, ir, source.facts, &client_model),
+                    );
+                    Pipe::translate(parser, render)
+                }
+                Mode::PassAnthropic => Pipe::Passthrough(PassthroughStream::new(&client_model)),
+                Mode::PassJson { client_wants_usage } => Pipe::Json(JsonPassthroughStream::new(
+                    route.inbound,
+                    &client_model,
+                    *client_wants_usage,
+                )),
+            };
+            route.rec.defer();
+            let rec = route.rec.clone();
+            let state = planned.state.clone();
+            let clock = route.shared.router.clock.clone();
+            let stream = StreamBody::new(
+                body,
+                &first,
+                pipe,
+                Duration::from_secs(target.upstream.timeouts.idle_secs),
+                Duration::from_secs(config.server.keepalive_secs),
+                vec![permit].into_iter().chain(slot).collect(),
+                Some(Box::new(move |summary| {
+                    // A stream that breaks after its first byte counts against the target.
+                    if summary.error.is_some() && !summary.cancelled {
+                        state.breaker.on_failure(
+                            clock.now(),
+                            summary.error.as_deref().unwrap_or("stream error"),
+                        );
+                    }
+                    rec.finish_stream(&summary);
+                })),
+            );
+            let mut b = Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .header("request-id", &route.rid);
+            for (k, v) in headers {
+                b = b.header(k, v);
+            }
+            b.body(stream.boxed_unsync()).expect("a valid response")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_classify_into_retry_and_alert() {
+        assert_eq!(classify_status(401), (true, true));
+        assert_eq!(classify_status(403), (true, true));
+        for s in [408, 429, 500, 502, 503, 504, 529] {
+            assert_eq!(classify_status(s), (true, false), "{s}");
+        }
+        for s in [400, 404, 413, 422, 418] {
+            assert_eq!(classify_status(s), (false, false), "{s}");
+        }
+    }
+
+    #[test]
+    fn backoff_is_exponential_with_full_jitter_and_capped() {
+        assert_eq!(backoff(0, 250, 5000, 1.0), Duration::from_millis(250));
+        assert_eq!(backoff(1, 250, 5000, 1.0), Duration::from_millis(500));
+        assert_eq!(backoff(3, 250, 5000, 1.0), Duration::from_millis(2000));
+        assert_eq!(
+            backoff(10, 250, 5000, 1.0),
+            Duration::from_millis(5000),
+            "capped"
+        );
+        assert_eq!(
+            backoff(2, 250, 5000, 0.0),
+            Duration::ZERO,
+            "full jitter reaches zero"
+        );
+        assert_eq!(backoff(2, 250, 5000, 0.5), Duration::from_millis(500));
+        assert!(
+            backoff(63, u64::MAX, u64::MAX, 1.0) > Duration::ZERO,
+            "no overflow"
+        );
+    }
+
+    #[test]
+    fn the_skipped_header_joins_skips() {
+        assert_eq!(skipped_header(&[]), None);
+        let s = [
+            Skip {
+                target: "a/m".into(),
+                reason: SkipReason::Vision,
+            },
+            Skip {
+                target: "b/m".into(),
+                reason: SkipReason::CircuitOpen,
+            },
+        ];
+        assert_eq!(
+            skipped_header(&s).as_deref(),
+            Some("a/m:vision,b/m:circuit-open")
+        );
+    }
 }

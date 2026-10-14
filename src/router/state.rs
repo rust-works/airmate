@@ -140,6 +140,41 @@ impl TargetState {
     }
 }
 
+/// The result of an upstream's active health check.
+#[derive(Debug, Default)]
+pub struct UpstreamHealth {
+    unhealthy: std::sync::atomic::AtomicBool,
+    last_error: Mutex<Option<String>>,
+}
+
+impl UpstreamHealth {
+    /// Whether the last probe failed.
+    #[must_use]
+    pub fn is_unhealthy(&self) -> bool {
+        self.unhealthy.load(Ordering::SeqCst)
+    }
+
+    /// Records a probe result.
+    ///
+    /// # Panics
+    ///
+    /// If the internal lock is poisoned.
+    pub fn set(&self, error: Option<String>) {
+        self.unhealthy.store(error.is_some(), Ordering::SeqCst);
+        *self.last_error.lock().expect("health lock") = error;
+    }
+
+    /// The last probe error, if the last probe failed.
+    ///
+    /// # Panics
+    ///
+    /// If the internal lock is poisoned.
+    #[must_use]
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().expect("health lock").clone()
+    }
+}
+
 /// Router state shared by every request.
 pub struct RouterState {
     /// Time.
@@ -151,6 +186,9 @@ pub struct RouterState {
     rr: Mutex<HashMap<String, u64>>,
     affinity: Mutex<Lru>,
     generation: AtomicU64,
+    health: Mutex<HashMap<String, Arc<UpstreamHealth>>>,
+    /// Upstream credentials the router has seen rejected (401 or 403).
+    pub auth_alerts: AtomicU64,
 }
 
 impl RouterState {
@@ -170,6 +208,8 @@ impl RouterState {
             rr: Mutex::new(HashMap::new()),
             affinity: Mutex::new(Lru::new(affinity_cap)),
             generation: AtomicU64::new(0),
+            health: Mutex::new(HashMap::new()),
+            auth_alerts: AtomicU64::new(0),
         }
     }
 
@@ -186,6 +226,21 @@ impl RouterState {
             .expect("targets lock")
             .entry(label.to_owned())
             .or_insert_with(|| Arc::new(TargetState::new(cfg, self.random.clone())))
+            .clone()
+    }
+
+    /// The health record for an upstream, created on first use.
+    ///
+    /// # Panics
+    ///
+    /// If an internal lock is poisoned.
+    #[must_use]
+    pub fn upstream_health(&self, upstream: &str) -> Arc<UpstreamHealth> {
+        self.health
+            .lock()
+            .expect("health lock")
+            .entry(upstream.to_owned())
+            .or_default()
             .clone()
     }
 

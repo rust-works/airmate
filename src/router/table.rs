@@ -40,6 +40,10 @@ pub struct UpstreamRt {
     pub max_concurrent: Option<u32>,
     /// The pooled HTTP client for this upstream.
     pub client: HttpClient,
+    /// Limits concurrent calls to this upstream, when configured.
+    pub slots: Option<Arc<tokio::sync::Semaphore>>,
+    /// The active health check, when configured: `(path, interval)`.
+    pub health_check: Option<(String, Duration)>,
 }
 
 impl UpstreamRt {
@@ -313,6 +317,13 @@ fn upstream_rt(
             key_setting,
             max_concurrent: u.max_concurrent,
             client: build_client(Duration::from_secs(u.timeouts.connect_secs)),
+            slots: u
+                .max_concurrent
+                .map(|n| Arc::new(tokio::sync::Semaphore::new(n as usize))),
+            health_check: u
+                .health_check
+                .as_ref()
+                .map(|h| (h.path.clone(), Duration::from_secs(h.interval_secs))),
         },
         warning,
     ))

@@ -115,6 +115,8 @@ pub struct ServerConfig {
     pub keepalive_secs: u64,
     /// Request headers that rules may match on; no other header is ever visible to a rule.
     pub rule_headers: Vec<String>,
+    /// Keep a conversation on the target that served its previous turn.
+    pub affinity: bool,
     /// `Host` values accepted besides loopback; required for a non-loopback bind.
     pub allowed_hosts: Vec<String>,
     /// Acknowledges the risk of a non-loopback bind without TLS.
@@ -137,6 +139,7 @@ impl Default for ServerConfig {
             buffer_cap_bytes: default_buffer_cap(),
             keepalive_secs: 15,
             rule_headers: Vec::new(),
+            affinity: true,
             allowed_hosts: Vec::new(),
             insecure_remote: false,
             tls: None,

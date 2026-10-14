@@ -168,6 +168,26 @@ impl Breaker {
         }
     }
 
+    /// Gives up a probe that was never resolved (the caller went away), so the next caller can
+    /// probe instead of waiting forever.
+    ///
+    /// # Panics
+    ///
+    /// If the internal lock is poisoned.
+    pub fn release_probe(&self) {
+        let mut i = self.inner.lock().expect("breaker lock");
+        if let State::HalfOpen {
+            cooldown,
+            probing: true,
+        } = i.state
+        {
+            i.state = State::HalfOpen {
+                probing: false,
+                cooldown,
+            };
+        }
+    }
+
     /// Records a success.
     ///
     /// # Panics
@@ -369,6 +389,25 @@ mod tests {
             b.on_failure(s(100), "e");
         }
         assert_eq!(b.try_acquire(s(100)), Admit::Denied { retry_at: s(130) });
+    }
+
+    #[test]
+    fn an_abandoned_probe_can_be_released_so_another_caller_probes() {
+        let b = breaker();
+        for _ in 0..3 {
+            b.on_failure(s(0), "e");
+        }
+        assert_eq!(b.try_acquire(s(30)), Admit::Probe);
+        assert!(!b.try_acquire(s(30)).allowed());
+        b.release_probe();
+        assert_eq!(b.try_acquire(s(30)), Admit::Probe);
+        b.on_success();
+        b.release_probe();
+        assert_eq!(
+            b.snapshot(s(30)).state,
+            "closed",
+            "releasing is a no-op unless a probe is out"
+        );
     }
 
     #[test]

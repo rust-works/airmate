@@ -5,6 +5,7 @@ pub mod breaker;
 pub mod catalog;
 pub mod classifier;
 pub mod clock;
+pub mod engine;
 pub mod glob;
 pub mod rules;
 pub mod state;

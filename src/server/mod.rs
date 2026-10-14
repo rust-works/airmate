@@ -31,6 +31,10 @@ use crate::auth::{Authenticator, Identity};
 use crate::config::schema::Config;
 use crate::config::validate::ConfigError;
 use crate::obs::{NullSink, RecordSink};
+use crate::router::catalog::Catalog;
+use crate::router::clock::{OsRandom, SystemClock};
+use crate::router::rules::{Action, Classifier, CompiledRule, RuleSet};
+use crate::router::state::RouterState;
 use crate::router::ModelTable;
 use crate::secret::{Secret, SecretResolver};
 use guard::{check_host, check_origin, extract_token, GuardConfig};
@@ -95,6 +99,10 @@ pub struct Tables {
     pub models: ModelTable,
     /// Signs and verifies thinking blocks; derived from the gateway token.
     pub signing_key: SigningKey,
+    /// What each model can do.
+    pub catalog: Catalog,
+    /// The routing rules and the classifiers they consult.
+    pub rules: RuleSet,
 }
 
 impl Tables {
@@ -108,11 +116,28 @@ impl Tables {
         resolver: &dyn SecretResolver,
         gateway_token: &Secret,
     ) -> Result<(Self, Vec<String>), Vec<ConfigError>> {
+        Self::build_with(config, resolver, gateway_token, Arc::new(NullSink))
+    }
+
+    /// Like [`Tables::build`], logging classifier calls to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// Every secret that cannot be resolved, and a malformed client key.
+    pub fn build_with(
+        config: Arc<Config>,
+        resolver: &dyn SecretResolver,
+        gateway_token: &Secret,
+        sink: Arc<dyn RecordSink>,
+    ) -> Result<(Self, Vec<String>), Vec<ConfigError>> {
         let (models, warnings) = ModelTable::build(&config, resolver)?;
         let auth = crate::auth::TokenAuthenticator::new(gateway_token, &config.clients)
             .map_err(|e| vec![ConfigError::new("clients", e.to_string())])?;
+        let rules = compile_rules(&config, &models, sink);
         Ok((
             Self {
+                catalog: Catalog::new(&config.catalog),
+                rules,
                 config,
                 auth: Box::new(auth),
                 models,
@@ -123,6 +148,57 @@ impl Tables {
     }
 }
 
+/// Turns the configured rules into rules that can be evaluated.
+fn compile_rules(config: &Config, models: &ModelTable, sink: Arc<dyn RecordSink>) -> RuleSet {
+    let rules = config
+        .rules
+        .iter()
+        .filter_map(|r| {
+            let action = match (&r.use_entry, &r.targets) {
+                (Some(name), _) => Action::Entry(name.clone()),
+                (None, Some(targets)) => Action::Targets(
+                    targets
+                        .iter()
+                        .filter_map(|t| {
+                            Some(crate::router::RouteTarget {
+                                upstream: models.upstream(&t.upstream)?.clone(),
+                                model: t.model.clone(),
+                                effort_levels: t
+                                    .effort_levels
+                                    .as_ref()
+                                    .map(|l| l.iter().map(|e| (*e).into()).collect()),
+                                max_output_tokens: t.max_output_tokens,
+                                weight: t.weight.unwrap_or(1),
+                                price: t.price,
+                            })
+                        })
+                        .collect(),
+                ),
+                (None, None) => return None,
+            };
+            Some(CompiledRule {
+                name: r.name.clone(),
+                when: r.when.clone(),
+                action,
+            })
+        })
+        .collect();
+    let classifiers: std::collections::HashMap<String, Arc<dyn Classifier>> = config
+        .classifiers
+        .iter()
+        .map(|c| {
+            (
+                c.name.clone(),
+                Arc::new(crate::router::classifier::HttpClassifier::new(
+                    c,
+                    sink.clone(),
+                )) as Arc<dyn Classifier>,
+            )
+        })
+        .collect();
+    RuleSet::new(rules, classifiers)
+}
+
 /// State shared by every connection.
 pub struct Shared {
     /// The listener facts the guard needs; restart-only.
@@ -131,6 +207,8 @@ pub struct Shared {
     pub permits: Arc<Semaphore>,
     /// Where request records go.
     pub log: Arc<dyn RecordSink>,
+    /// What the router has learned: breakers, latency, affinity.
+    pub router: Arc<RouterState>,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -193,6 +271,29 @@ pub async fn bind_with(
     tables: Tables,
     log: Arc<dyn RecordSink>,
 ) -> Result<BoundGateway, BindError> {
+    bind_with_deps(
+        config,
+        tables,
+        log,
+        Arc::new(SystemClock::new()),
+        Arc::new(OsRandom),
+    )
+    .await
+}
+
+/// Like [`bind_with`], with the clock and the source of randomness the router uses injected, so
+/// breakers, backoff and weighted choice can be driven deterministically.
+///
+/// # Errors
+///
+/// The address is invalid or cannot be bound.
+pub async fn bind_with_deps(
+    config: &Config,
+    tables: Tables,
+    log: Arc<dyn RecordSink>,
+    clock: Arc<dyn crate::router::clock::Clock>,
+    random: Arc<dyn crate::router::clock::Random>,
+) -> Result<BoundGateway, BindError> {
     let addr: SocketAddr = format!(
         "{}:{}",
         if config.server.bind.contains(':') {
@@ -224,6 +325,12 @@ pub async fn bind_with(
         },
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
         log,
+        router: Arc::new(RouterState::new(
+            clock,
+            random,
+            (&config.circuit).into(),
+            10_000,
+        )),
         tables: RwLock::new(Arc::new(tables)),
     });
     Ok(BoundGateway {

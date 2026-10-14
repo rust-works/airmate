@@ -23,8 +23,9 @@ use tokio::sync::{mpsc, watch};
 use airmate::config::paths::EnvFn;
 use airmate::config::{load_str, Config};
 use airmate::obs::{RecordSink, RequestRecord};
+use airmate::router::clock::{Clock, OsRandom, Random, SystemClock};
 use airmate::secret::{Secret, SystemResolver};
-use airmate::server::{bind_with, Tables};
+use airmate::server::{bind_with_deps, Tables};
 
 /// A request the mock saw.
 #[derive(Debug, Clone)]
@@ -328,6 +329,24 @@ impl TestGateway {
     }
 
     pub async fn start_with_sink(yaml: &str, env: EnvFn<'_>, sink: Arc<dyn RecordSink>) -> Self {
+        Self::start_full(
+            yaml,
+            env,
+            sink,
+            Arc::new(SystemClock::new()),
+            Arc::new(OsRandom),
+        )
+        .await
+    }
+
+    /// Starts a gateway with the router's clock and randomness injected.
+    pub async fn start_full(
+        yaml: &str,
+        env: EnvFn<'_>,
+        sink: Arc<dyn RecordSink>,
+        clock: Arc<dyn Clock>,
+        random: Arc<dyn Random>,
+    ) -> Self {
         let mut config = load_str(yaml, None).unwrap_or_else(|e| panic!("bad test config:\n{e}"));
         config.server.port = 0;
         let token = "test-gateway-token".to_owned();
@@ -337,7 +356,9 @@ impl TestGateway {
             &Secret::new(token.clone()),
         )
         .unwrap_or_else(|e| panic!("tables: {e:?}"));
-        let gw = bind_with(&config, tables, sink).await.unwrap();
+        let gw = bind_with_deps(&config, tables, sink, clock, random)
+            .await
+            .unwrap();
         let addr = gw.local_addr();
         let shared = gw.shared();
         let (shutdown, rx) = watch::channel(false);

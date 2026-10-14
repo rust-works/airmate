@@ -185,7 +185,7 @@ pub struct StreamBody {
     ping_every: Duration,
     finished: bool,
     on_done: Option<OnDone>,
-    _permit: Option<OwnedSemaphorePermit>,
+    _permits: Vec<OwnedSemaphorePermit>,
 }
 
 impl StreamBody {
@@ -197,7 +197,7 @@ impl StreamBody {
         mut pipe: Pipe,
         idle_for: Duration,
         ping_every: Duration,
-        permit: Option<OwnedSemaphorePermit>,
+        permits: Vec<OwnedSemaphorePermit>,
         on_done: Option<OnDone>,
     ) -> Self {
         let mut out = VecDeque::new();
@@ -215,7 +215,7 @@ impl StreamBody {
             ping_every,
             finished: false,
             on_done,
-            _permit: permit,
+            _permits: permits,
         }
     }
 
