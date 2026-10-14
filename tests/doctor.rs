@@ -189,6 +189,7 @@ async fn a_stream_that_breaks_before_its_end_fails_the_probe() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_command_exits_0_when_everything_passes_and_3_when_a_probe_fails() {
     let dir = std::path::PathBuf::from(format!("/tmp/am-doctor-{}", std::process::id()));

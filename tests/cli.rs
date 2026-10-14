@@ -1,4 +1,6 @@
 //! Runs the built binary, so `src/main.rs` and the command line are exercised and covered.
+//! The scenarios use `/tmp` paths and Unix sockets, so they run on Unix only.
+#![cfg(unix)]
 
 mod support;
 
