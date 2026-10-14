@@ -38,7 +38,7 @@ struct Parser {
 }
 
 /// Parses a data URI or URL into an image source.
-fn image_source(url: &str) -> ImageSource {
+pub(super) fn image_source(url: &str) -> ImageSource {
     if let Some(rest) = url.strip_prefix("data:") {
         if let Some((meta, data)) = rest.split_once(',') {
             if let Some(media_type) = meta.strip_suffix(";base64") {

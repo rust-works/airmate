@@ -15,6 +15,7 @@
 
 pub mod anthropic;
 pub mod chat;
+pub mod responses;
 
 use std::fmt;
 
@@ -72,13 +73,19 @@ pub enum Group {
     StopReason,
     /// A stream delta type.
     StreamDelta,
+    /// An input item type (Responses).
+    InputItem,
+    /// A content part type inside an input item (Responses).
+    ContentPart,
 }
 
 impl Group {
     /// Every group, in the order the generated tables list them.
-    pub const ALL: [Group; 12] = [
+    pub const ALL: [Group; 14] = [
         Self::Request,
         Self::MessageKey,
+        Self::InputItem,
+        Self::ContentPart,
         Self::ThinkingField,
         Self::ThinkingType,
         Self::ThinkingDisplay,
@@ -107,6 +114,8 @@ impl Group {
             Self::OutputConfigKey => "Output config keys",
             Self::StopReason => "Stop reasons",
             Self::StreamDelta => "Stream deltas",
+            Self::InputItem => "Input item types",
+            Self::ContentPart => "Content part types",
         }
     }
 }
@@ -210,6 +219,7 @@ pub fn table(inbound: Protocol) -> &'static [Entry] {
     match inbound {
         Protocol::Anthropic => anthropic::TABLE,
         Protocol::Chat => chat::TABLE,
+        Protocol::Responses => responses::TABLE,
         _ => &[],
     }
 }
