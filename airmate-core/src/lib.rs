@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod estimate;
+pub mod facts;
 pub mod flavor;
 pub mod inbound;
 pub mod ir;
