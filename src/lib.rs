@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod keychain;
 pub mod secret;
+pub mod server;
 
 /// The line the `airmate` binary prints.
 #[must_use]

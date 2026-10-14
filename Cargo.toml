@@ -20,8 +20,22 @@ rust-version = "1.88.0"
 airmate-core = { path = "airmate-core", version = "0.1.0" }
 # Base64url for generated tokens and keys.
 base64 = "0.23.1"
+# Byte buffers for request and response bodies.
+bytes = "1.12.1"
 # The OS CSPRNG for tokens and keys.
 getrandom = "0.4.3"
+# The Body trait for the streaming response body.
+http-body = "1.1.0"
+# Body helpers: collecting, limiting and boxing.
+http-body-util = "0.1.5"
+# HTTP/1 server and client (no framework; the router is in-tree).
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server", "client"] }
+# HTTPS for upstream calls, with rustls and webpki roots (never OpenSSL).
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
+# The pooled HTTP client and tokio glue for hyper.
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "server", "client-legacy", "http1"] }
+# TLS for upstream calls (ring provider; no OpenSSL, no native-tls).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Derive (de)serialisation for the configuration schema.
 serde = { version = "1.0.229", features = ["derive"] }
 # JSON for the request log, `config show` and admin output.
@@ -30,5 +44,7 @@ serde_json = "1.0.154"
 serde_norway = "0.9.42"
 # SHA-256 for client key hashes and constant-time token comparison.
 sha2 = "0.11.1"
+# Async runtime with a minimal feature set (not `full`).
+tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs"] }
 # Zero secrets on drop.
 zeroize = { version = "1.9.1", features = ["derive"] }
