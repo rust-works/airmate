@@ -125,6 +125,18 @@ pub trait StreamParse: Send {
     fn finish(&mut self) -> Vec<IrEvent>;
 }
 
+/// Renders [`IrEvent`]s into the client's protocol.
+pub trait StreamRender: Send {
+    /// Feeds one event and returns the bytes to send.
+    fn push(&mut self, ev: &IrEvent) -> Vec<u8>;
+    /// Ends the render; emits an error event if the stream was cut off before a terminal event.
+    fn finish(&mut self) -> Vec<u8>;
+    /// Bytes to send while the upstream is silent.
+    fn keepalive(&self) -> Vec<u8>;
+    /// Whether the stream has ended.
+    fn is_done(&self) -> bool;
+}
+
 /// Tracks whether a JSON value, fed in fragments, has become complete.
 ///
 /// It counts `{`/`[` depth outside strings. Tool-call arguments are JSON objects, so the call is

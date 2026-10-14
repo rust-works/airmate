@@ -14,13 +14,18 @@ use airmate_core::estimate::{estimate_input_tokens, ESTIMATE_HEADER_VALUE};
 use airmate_core::facts::Facts;
 use airmate_core::inbound::{anthropic as inbound, InboundCtx};
 use airmate_core::ir::{IrRequest, Protocol};
+use airmate_core::outbound::anthropic::PassthroughStream;
+use airmate_core::outbound::chat_parse::ChatStream;
+use airmate_core::outbound::responses_parse::ResponsesStream;
 use airmate_core::outbound::{
     anthropic as passthrough, chat, chat_parse, responses, responses_parse, ParseCtx,
     UpstreamError, UpstreamRequest,
 };
 use airmate_core::policy::{ignored_header, Ignored, PolicyConfig};
-use airmate_core::stream::anthropic_render::{render_message, RenderCtx};
+use airmate_core::stream::anthropic_render::{render_message, AnthropicRender, RenderCtx};
+use airmate_core::stream::StreamParse;
 
+use super::stream::{Pipe, StreamBody};
 use super::upstream::{retry_after, send, UpstreamResponse};
 use super::{acquire, error_response, full, read_body, GwBody, Route};
 use crate::router::{ModelEntry, Resolution, RouteTarget};
@@ -189,14 +194,8 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         Ok(p) => p,
         Err(e) => return fail(&route, e),
     };
-    if prepared.request.stream {
-        return fail(
-            &route,
-            GatewayError::new(ErrorKind::Api, "streaming responses are not available yet"),
-        );
-    }
     let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
-    let _permit = match acquire(&route.shared, queue).await {
+    let permit = match acquire(&route.shared, queue).await {
         Ok(p) => p,
         Err(e) => return fail(&route, e),
     };
@@ -207,6 +206,9 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     if !resp.status.is_success() {
         let e = error_from_upstream(resp, &target, &prepared).await;
         return fail(&route, e);
+    }
+    if prepared.request.stream {
+        return stream_response(&route, resp, &target, &prepared, client_model, permit).await;
     }
     let bytes = match collect(resp.body, 256 << 20).await {
         Ok(b) => b,
@@ -251,6 +253,93 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         passthrough::rewrite_response(&bytes, &client_model).0
     };
     json_ok(&route, out, &headers)
+}
+
+/// Waits for the first upstream data frame: a failure before the first byte is still an error
+/// response, not a broken stream.
+async fn first_chunk(body: &mut Incoming, wait: Duration) -> Result<Bytes, GatewayError> {
+    let read = async {
+        loop {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        if !data.is_empty() {
+                            return Ok(data);
+                        }
+                    }
+                }
+                Some(Err(e)) => return Err(format!("the upstream connection broke: {e}")),
+                None => {
+                    return Err("the upstream closed the stream without sending anything".to_owned())
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(wait, read).await {
+        Ok(Ok(b)) => Ok(b),
+        Ok(Err(detail)) => Err(GatewayError::new(ErrorKind::BadGateway, detail)),
+        Err(_) => Err(GatewayError::new(
+            ErrorKind::Timeout,
+            "the upstream sent no data in time",
+        )),
+    }
+}
+
+async fn stream_response(
+    route: &Route,
+    resp: UpstreamResponse,
+    target: &RouteTarget,
+    prepared: &Prepared,
+    client_model: String,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Response<GwBody> {
+    let config = &route.tables.config;
+    let up = &target.upstream;
+    let mut body = resp.body;
+    let first = match first_chunk(&mut body, Duration::from_secs(up.timeouts.first_byte_secs)).await
+    {
+        Ok(b) => b,
+        Err(e) => return fail(route, e),
+    };
+    let core = target.core_target(config.server.think_tags);
+    let pipe = if let Some(ir) = &prepared.ir {
+        let ctx = ParseCtx::new(&core, &prepared.request);
+        let parser: Box<dyn StreamParse> = match core.protocol {
+            Protocol::Responses => Box::new(ResponsesStream::new(ctx)),
+            _ => Box::new(ChatStream::new(ctx)),
+        };
+        let render = AnthropicRender::new(RenderCtx {
+            model: client_model,
+            message_id: message_id(),
+            signing_key: Some(route.tables.signing_key.clone()),
+            origin: core.origin(),
+            thinking_wanted: ir.reasoning.wanted(),
+            display: ir.reasoning.display,
+            est_input_tokens: prepared.facts.est_input_tokens,
+            buffer_cap: usize::try_from(config.server.buffer_cap_bytes).unwrap_or(usize::MAX),
+        });
+        Pipe::translate(parser, Box::new(render))
+    } else {
+        Pipe::Passthrough(PassthroughStream::new(&client_model))
+    };
+    let stream = StreamBody::new(
+        body,
+        &first,
+        pipe,
+        Duration::from_secs(up.timeouts.idle_secs),
+        Duration::from_secs(config.server.keepalive_secs),
+        Some(permit),
+        None,
+    );
+    let mut b = Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("request-id", &route.rid);
+    for (k, v) in reply_headers(target, &prepared.ignored) {
+        b = b.header(k, v);
+    }
+    b.body(stream.boxed_unsync()).expect("a valid response")
 }
 
 fn reply_headers(target: &RouteTarget, ignored: &[Ignored]) -> Vec<(&'static str, String)> {

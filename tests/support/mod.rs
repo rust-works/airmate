@@ -5,6 +5,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -123,6 +124,10 @@ type Handler = dyn Fn(&Recorded) -> Reply + Send + Sync;
 pub struct Mock {
     pub addr: SocketAddr,
     requests: Arc<Mutex<Vec<Recorded>>>,
+    /// Streams whose receiver went away mid-stream: the gateway cancelled the upstream call.
+    pub dropped: Arc<AtomicUsize>,
+    /// Chunks of a scripted stream the mock managed to hand to the connection.
+    pub sent: Arc<AtomicUsize>,
 }
 
 impl Mock {
@@ -132,6 +137,9 @@ impl Mock {
         let requests: Arc<Mutex<Vec<Recorded>>> = Arc::default();
         let handler: Arc<Handler> = Arc::new(handler);
         let seen = requests.clone();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let (dropped2, sent2) = (dropped.clone(), sent.clone());
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -139,11 +147,15 @@ impl Mock {
                 };
                 let handler = handler.clone();
                 let seen = seen.clone();
+                let (dropped, sent) = (dropped2.clone(), sent2.clone());
                 tokio::spawn(async move {
                     let svc = service_fn(move |req: Request<Incoming>| {
                         let handler = handler.clone();
                         let seen = seen.clone();
-                        async move { Ok::<_, Infallible>(answer(req, handler, seen).await) }
+                        let (dropped, sent) = (dropped.clone(), sent.clone());
+                        async move {
+                            Ok::<_, Infallible>(answer(req, handler, seen, dropped, sent).await)
+                        }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), svc)
@@ -151,7 +163,12 @@ impl Mock {
                 });
             }
         });
-        Self { addr, requests }
+        Self {
+            addr,
+            requests,
+            dropped,
+            sent,
+        }
     }
 
     pub fn url(&self) -> String {
@@ -173,6 +190,8 @@ async fn answer(
     req: Request<Incoming>,
     handler: Arc<Handler>,
     seen: Arc<Mutex<Vec<Recorded>>>,
+    dropped: Arc<AtomicUsize>,
+    sent: Arc<AtomicUsize>,
 ) -> Response<MockBody> {
     let (parts, body) = req.into_parts();
     let body = body
@@ -232,8 +251,10 @@ async fn answer(
                     match part {
                         Part::Bytes(b) => {
                             if tx.send(Ok(Frame::data(Bytes::from(b)))).await.is_err() {
+                                dropped.fetch_add(1, Ordering::SeqCst);
                                 return;
                             }
+                            sent.fetch_add(1, Ordering::SeqCst);
                         }
                         Part::Delay(d) => tokio::time::sleep(d).await,
                         Part::Reset => {

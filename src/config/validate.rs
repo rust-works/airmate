@@ -283,6 +283,12 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
             "must be at least 1",
         ));
     }
+    if s.keepalive_secs == 0 {
+        out.push(ConfigError::new(
+            "server.keepalive_secs",
+            "must be at least 1",
+        ));
+    }
     if s.buffer_cap_bytes == 0 {
         out.push(ConfigError::new(
             "server.buffer_cap_bytes",

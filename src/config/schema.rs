@@ -107,6 +107,8 @@ pub struct ServerConfig {
     pub think_tags: bool,
     /// The cap on the stream interleaving buffer, in bytes.
     pub buffer_cap_bytes: u64,
+    /// Seconds of upstream silence before a keep-alive `ping` is sent to the client.
+    pub keepalive_secs: u64,
     /// `Host` values accepted besides loopback; required for a non-loopback bind.
     pub allowed_hosts: Vec<String>,
     /// Acknowledges the risk of a non-loopback bind without TLS.
@@ -127,6 +129,7 @@ impl Default for ServerConfig {
             unknown_fields: UnknownFieldsMode::Reject,
             think_tags: yes(),
             buffer_cap_bytes: default_buffer_cap(),
+            keepalive_secs: 15,
             allowed_hosts: Vec::new(),
             insecure_remote: false,
             tls: None,

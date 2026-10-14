@@ -350,6 +350,21 @@ impl AnthropicRender {
     }
 }
 
+impl super::StreamRender for AnthropicRender {
+    fn push(&mut self, ev: &IrEvent) -> Vec<u8> {
+        AnthropicRender::push(self, ev)
+    }
+    fn finish(&mut self) -> Vec<u8> {
+        AnthropicRender::finish(self)
+    }
+    fn keepalive(&self) -> Vec<u8> {
+        AnthropicRender::ping()
+    }
+    fn is_done(&self) -> bool {
+        AnthropicRender::is_done(self)
+    }
+}
+
 /// Renders a complete (non-streaming) response as an Anthropic message.
 #[must_use]
 pub fn render_message(c: &IrCompletion, ctx: &RenderCtx) -> Vec<u8> {

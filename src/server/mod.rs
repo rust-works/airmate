@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod guard;
+pub mod stream;
 pub mod upstream;
 
 use std::convert::Infallible;

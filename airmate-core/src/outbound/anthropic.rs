@@ -303,6 +303,20 @@ impl PassthroughStream {
         out
     }
 
+    /// Ends the stream with an `error` event (for example when the upstream connection broke).
+    pub fn fail(&mut self, message: &str) -> Vec<u8> {
+        if self.errored || self.saw_stop {
+            return Vec::new();
+        }
+        self.error_event(message)
+    }
+
+    /// Bytes to send while the upstream is silent.
+    #[must_use]
+    pub fn keepalive() -> Vec<u8> {
+        format_event(Some("ping"), r#"{"type":"ping"}"#)
+    }
+
     fn error_event(&mut self, message: &str) -> Vec<u8> {
         self.errored = true;
         let data = serde_json::json!({"type": "error", "error": {"type": "api_error", "message": message}});
