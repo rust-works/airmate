@@ -19,6 +19,7 @@ use tokio::time::{Instant, Sleep};
 
 use airmate_core::ir::Usage;
 use airmate_core::outbound::anthropic::PassthroughStream;
+use airmate_core::outbound::json_passthrough::JsonPassthroughStream;
 use airmate_core::stream::{IrEvent, StreamError, StreamErrorKind, StreamParse, StreamRender};
 
 /// What a finished stream said, for the request log and the ledger.
@@ -47,8 +48,10 @@ pub enum Pipe {
         /// What the stream has said.
         summary: StreamSummary,
     },
-    /// Same protocol both ways: rewrite and forward.
+    /// Anthropic both ways: rewrite and forward.
     Passthrough(PassthroughStream),
+    /// Chat or Responses both ways: rewrite and forward.
+    Json(JsonPassthroughStream),
 }
 
 impl Pipe {
@@ -95,6 +98,7 @@ impl Pipe {
                 Self::render_events(render.as_mut(), summary, events)
             }
             Self::Passthrough(p) => p.push(bytes),
+            Self::Json(p) => p.push(bytes),
         }
     }
 
@@ -112,6 +116,7 @@ impl Pipe {
                 out
             }
             Self::Passthrough(p) => p.finish(),
+            Self::Json(p) => p.finish(),
         }
     }
 
@@ -129,6 +134,7 @@ impl Pipe {
                 render.push(&ev)
             }
             Self::Passthrough(p) => p.fail(message),
+            Self::Json(p) => p.fail(message),
         }
     }
 
@@ -138,6 +144,7 @@ impl Pipe {
         match self {
             Self::Translate { render, .. } => render.keepalive(),
             Self::Passthrough(_) => PassthroughStream::keepalive(),
+            Self::Json(_) => JsonPassthroughStream::keepalive(),
         }
     }
 
@@ -149,6 +156,13 @@ impl Pipe {
             Self::Passthrough(p) => StreamSummary {
                 usage: p.summary().usage,
                 finish: p.summary().stop_reason.clone(),
+                error: None,
+                completed: p.completed(),
+                cancelled: false,
+            },
+            Self::Json(p) => StreamSummary {
+                usage: p.usage(),
+                finish: None,
                 error: None,
                 completed: p.completed(),
                 cancelled: false,

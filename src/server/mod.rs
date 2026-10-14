@@ -1,6 +1,7 @@
 //! The HTTP server: listener, request guard and routing.
 
 pub mod anthropic;
+pub mod generate;
 pub mod guard;
 pub mod record;
 pub mod stream;
@@ -321,11 +322,14 @@ async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody>
         tables,
         identity,
         rid: rid.clone(),
+        inbound,
         rec: rec.clone(),
     };
     let path = parts.uri.path().to_owned();
     let resp = match (parts.method.as_str(), path.as_str()) {
-        ("POST", "/v1/messages") => anthropic::messages(route, parts, body).await,
+        ("POST", "/v1/messages" | "/v1/chat/completions" | "/v1/responses") => {
+            generate::generate(route, parts, body).await
+        }
         ("POST", "/v1/messages/count_tokens") => anthropic::count_tokens(route, parts, body).await,
         ("GET", "/v1/models") => anthropic::models(&route, &parts),
         ("GET", p) if p.starts_with("/v1/models/") => {
@@ -350,6 +354,8 @@ pub struct Route {
     pub identity: Identity,
     /// The request id.
     pub rid: String,
+    /// The protocol the client speaks.
+    pub inbound: Protocol,
     /// Accumulates the request-log record.
     pub rec: record::Recorder,
 }

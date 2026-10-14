@@ -382,8 +382,14 @@ impl TestGateway {
         let mut b = Request::builder()
             .method(method)
             .uri(format!("http://{}{}", self.addr, path))
-            .header("x-api-key", &self.token)
             .header("content-type", "application/json");
+        // A test that brings its own credentials does not also get the default ones.
+        let own_auth = headers.iter().any(|(k, _)| {
+            k.eq_ignore_ascii_case("x-api-key") || k.eq_ignore_ascii_case("authorization")
+        });
+        if !own_auth {
+            b = b.header("x-api-key", &self.token);
+        }
         for (k, v) in headers {
             b = b.header(*k, *v);
         }
