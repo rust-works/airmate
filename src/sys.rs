@@ -107,12 +107,27 @@ pub fn process_alive(_: u32) -> bool {
 /// The directory or socket cannot be created, or the path is in use.
 #[cfg(unix)]
 pub fn bind_private_socket(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     if let Some(dir) = path.parent() {
+        // Only a directory made here is locked down: a socket in someone's home or in `/tmp` must
+        // not change that directory's mode. The socket itself is `0600` either way.
+        let existed = dir.exists();
         std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        if !existed {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
-    if path.exists() {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        // Never delete what is not a socket: a mistyped setting must not eat a data file.
+        if !meta.file_type().is_socket() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} exists and is not a socket; refusing to replace it",
+                    path.display()
+                ),
+            ));
+        }
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
@@ -275,6 +290,43 @@ mod tests {
         }
         let again = bind_private_socket(&path).expect("a stale socket is replaced");
         drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_a_socket_is_never_deleted_and_an_existing_directory_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let dir =
+            std::path::PathBuf::from(format!("/tmp/am-sys-keep-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("precious.txt");
+        std::fs::write(&file, "keep me").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(async { bind_private_socket(&file) })
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+        // A socket in a directory that already existed leaves the directory's mode alone.
+        let sock = dir.join("s.sock");
+        let listener = rt.block_on(async { bind_private_socket(&sock) }).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

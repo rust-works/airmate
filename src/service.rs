@@ -246,9 +246,8 @@ pub fn systemd_service(spec: &Spec) -> String {
         )
     };
     format!(
-        "[Unit]\nDescription=airmate gateway\n{unit_extra}\n[Service]\nExecStart={}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths={}\n{install}",
+        "[Unit]\nDescription=airmate gateway\n{unit_extra}\n[Service]\nExecStart={}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\n{install}",
         exec.join(" "),
-        systemd_word(&spec.state.to_string_lossy()),
     )
 }
 
@@ -510,9 +509,22 @@ mod tests {
             "After=airmate.socket",
             "Restart=on-failure",
             "NoNewPrivileges=true",
-            "ReadWritePaths=/home/u/.local/state/airmate",
         ] {
             assert!(svc.contains(want), "missing {want:?}\n{svc}");
+        }
+        // Found in review: filesystem sandboxing made the admin socket under /run/user read-only,
+        // and needs namespaces a user manager may not be allowed. Only NoNewPrivileges, which needs
+        // neither, is set.
+        for sandbox in [
+            "ProtectSystem",
+            "ReadWritePaths",
+            "PrivateTmp",
+            "ProtectHome",
+        ] {
+            assert!(
+                !svc.contains(sandbox),
+                "{sandbox} would break the admin socket:\n{svc}"
+            );
         }
         assert!(
             !svc.contains("[Install]"),
