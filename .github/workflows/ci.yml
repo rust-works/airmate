@@ -39,7 +39,7 @@ jobs:
         toolchain: ${{ matrix.rust }}
     - uses: Swatinem/rust-cache@v2
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
 
   msrv:
     name: MSRV
@@ -54,7 +54,7 @@ jobs:
         toolchain: 1.88.0
     - uses: Swatinem/rust-cache@v2
     - name: Build and test on the minimum supported Rust version
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
 
   cross-platform-build:
     name: Build (${{ matrix.os }})
@@ -70,7 +70,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - name: Build and test
-      run: cargo test --release --verbose
+      run: cargo test --workspace --release --verbose
 
   fmt:
     name: Rustfmt
@@ -93,7 +93,7 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@v2
     - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   docs:
     name: Docs
@@ -105,7 +105,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - name: Build docs
-      run: cargo doc --no-deps --document-private-items
+      run: cargo doc --workspace --no-deps --document-private-items
 
   coverage:
     name: Coverage
@@ -125,6 +125,15 @@ jobs:
     - uses: action-works/patchcov-action@v2.0
       with:
         fail-under-lines: 30
+
+  core-purity:
+    name: Core Purity
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Check airmate-core has no I/O dependencies
+      run: ./scripts/check-core-deps.sh
 
   audit:
     name: Security Audit

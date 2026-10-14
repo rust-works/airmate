@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "airmate"
 version = "0.1.0"
+dependencies = [
+ "airmate-core",
+]
+
+[[package]]
+name = "airmate-core"
+version = "0.1.0"

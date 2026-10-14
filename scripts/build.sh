@@ -7,7 +7,7 @@
 set -e
 
 echo "🔨 Building project..."
-cargo build
+cargo build --workspace
 
 echo "✅ Build successful!"
 
@@ -17,17 +17,17 @@ cargo fmt --check
 echo "✅ Code formatting check passed!"
 
 echo "🔍 Running clippy checks..."
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo "✅ Clippy checks passed!"
 
 echo "🧪 Running tests..."
-cargo test
+cargo test --workspace
 
 echo "✅ Tests passed!"
 
 # CI denies broken intra-doc links; the plain build does not build rustdoc.
 echo "📚 Building docs..."
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
 echo "✅ All checks passed! 🎉"

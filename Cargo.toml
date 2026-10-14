@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "airmate-core"]
+
 [package]
 name = "airmate"
 version = "0.1.0"
@@ -13,3 +16,4 @@ categories = ["command-line-utilities"]
 rust-version = "1.88.0"
 
 [dependencies]
+airmate-core = { path = "airmate-core", version = "0.1.0" }

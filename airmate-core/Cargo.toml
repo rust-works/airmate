@@ -1,0 +1,15 @@
+[package]
+name = "airmate-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["John Ky <newhoggy@gmail.com>"]
+license = "BSD-3-Clause"
+description = "The sans-I/O translation core of airmate: IR, protocol adapters, field policy and stream state machines."
+repository = "https://github.com/rust-works/airmate"
+documentation = "https://docs.rs/airmate-core"
+readme = "README.md"
+keywords = ["ai", "llm", "anthropic", "openai", "translation"]
+categories = ["api-bindings"]
+rust-version = "1.88.0"
+
+[dependencies]
