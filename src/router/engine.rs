@@ -303,6 +303,7 @@ mod tests {
             effort_levels: None,
             think_tags: None,
             proxy: None,
+            aws: None,
         }
     }
 

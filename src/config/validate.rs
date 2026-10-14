@@ -176,6 +176,31 @@ fn check_upstream(u: &UpstreamConfig, out: &mut Vec<ConfigError>) {
             "upstream proxies are not supported yet",
         ));
     }
+    match (&u.aws, u.protocol) {
+        (Some(_), proto) if proto != ProtocolName::Bedrock => out.push(ConfigError::new(
+            format!("{p}.aws"),
+            "AWS credentials apply to `protocol: bedrock` upstreams only",
+        )),
+        (Some(a), _) => {
+            if a.region.is_none() && crate::router::table::region_from_url(&u.url).is_none() {
+                out.push(ConfigError::new(
+                    format!("{p}.aws.region"),
+                    "set `region`: it cannot be read from the URL",
+                ));
+            }
+            if u.api_key.is_some() {
+                out.push(ConfigError::new(
+                    format!("{p}.aws"),
+                    "use either `aws` (signed requests) or `api_key` (a Bedrock API key), not both",
+                ));
+            }
+        }
+        (None, ProtocolName::Bedrock) if u.api_key.is_none() => out.push(ConfigError::new(
+            format!("{p}.api_key"),
+            "a Bedrock upstream needs `aws` credentials or an `api_key` (a Bedrock API key)",
+        )),
+        (None, _) => {}
+    }
     if matches!(u.protocol, ProtocolName::Gemini | ProtocolName::Bedrock)
         && u.flavor != super::schema::FlavorName::Generic
     {
@@ -509,6 +534,7 @@ mod tests {
             effort_levels: None,
             think_tags: None,
             proxy: None,
+            aws: None,
         }
     }
 
@@ -624,6 +650,43 @@ mod tests {
         c.upstreams[0].protocol = ProtocolName::Gemini;
         c.upstreams[0].flavor = FlavorName::Fireworks;
         assert!(has(&c, "flavors apply"));
+    }
+
+    #[test]
+    fn bedrock_needs_credentials_and_a_region_and_aws_applies_only_to_bedrock() {
+        use crate::config::schema::AwsConfig;
+        let aws = |region: Option<&str>| AwsConfig {
+            region: region.map(str::to_owned),
+            access_key_id: SecretRef::Env("AK".into()),
+            secret_access_key: SecretRef::Env("SK".into()),
+            session_token: None,
+        };
+        let mut c = good();
+        c.upstreams[0].protocol = ProtocolName::Bedrock;
+        c.upstreams[0].url = "https://bedrock-runtime.us-west-2.amazonaws.com".into();
+        assert!(has(&c, "needs `aws` credentials or an `api_key`"));
+        c.upstreams[0].aws = Some(aws(None));
+        assert!(
+            problems(&c).is_empty(),
+            "the region is read from the URL: {:?}",
+            problems(&c)
+        );
+        c.upstreams[0].url = "http://localhost:4566".into();
+        assert!(has(&c, "set `region`"));
+        c.upstreams[0].aws = Some(aws(Some("us-east-1")));
+        assert!(problems(&c).is_empty());
+        c.upstreams[0].api_key = Some(SecretRef::Env("K".into()));
+        assert!(has(&c, "either `aws`"));
+        c.upstreams[0].api_key = None;
+        c.upstreams[0].protocol = ProtocolName::Chat;
+        assert!(has(&c, "`protocol: bedrock` upstreams only"));
+        let mut key_only = good();
+        key_only.upstreams[0].protocol = ProtocolName::Bedrock;
+        key_only.upstreams[0].api_key = Some(SecretRef::Env("K".into()));
+        assert!(
+            problems(&key_only).is_empty(),
+            "a Bedrock API key is enough"
+        );
     }
 
     #[test]

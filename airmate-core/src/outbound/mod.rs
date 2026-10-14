@@ -3,6 +3,8 @@
 pub mod anthropic;
 pub mod anthropic_build;
 pub mod anthropic_parse;
+pub mod bedrock;
+pub mod bedrock_parse;
 pub mod chat;
 pub mod chat_parse;
 pub mod embeddings;
@@ -11,6 +13,7 @@ pub mod gemini_parse;
 pub mod json_passthrough;
 pub mod responses;
 pub mod responses_parse;
+pub mod sigv4;
 
 use crate::flavor::Flavor;
 use crate::ir::{Effort, Origin, Protocol};
@@ -184,6 +187,7 @@ impl UpstreamError {
             "reduce the length",
             "exceeds the maximum number of tokens",
             "input token count",
+            "input is too long",
         ]
         .iter()
         .any(|needle| m.contains(needle))

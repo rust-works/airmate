@@ -454,6 +454,25 @@ pub struct UpstreamConfig {
     /// An HTTP proxy for this upstream.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// AWS credentials, for `protocol: bedrock` (a Bedrock API key goes in `api_key` instead).
+    #[serde(default)]
+    pub aws: Option<AwsConfig>,
+}
+
+/// `upstreams[].aws:` credentials for signing Bedrock requests with Signature Version 4.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsConfig {
+    /// The region, e.g. `us-east-1`. Defaults to the one in a `bedrock-runtime.<region>` URL.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// The access key id.
+    pub access_key_id: SecretRef,
+    /// The secret access key.
+    pub secret_access_key: SecretRef,
+    /// The session token, for temporary credentials.
+    #[serde(default)]
+    pub session_token: Option<SecretRef>,
 }
 
 fn default_protocol() -> ProtocolName {

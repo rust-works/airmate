@@ -173,6 +173,7 @@ mod tests {
                 effort_levels: None,
                 think_tags: None,
                 proxy: None,
+                aws: None,
             });
         let errs = reload(&shared, missing_secret, &resolver, &token).unwrap_err();
         assert!(errs[0].message.contains("NOT_SET"));

@@ -195,7 +195,18 @@ impl Tables {
         let rules = compile_rules(&config, &models, sink);
         let redactions: Vec<Secret> = models
             .upstreams()
-            .filter_map(|u| u.api_key.clone())
+            .flat_map(|u| {
+                let aws = u.aws.iter().flat_map(|a| {
+                    [
+                        Some(a.access_key_id.clone()),
+                        Some(a.secret_access_key.clone()),
+                        a.session_token.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                });
+                u.api_key.clone().into_iter().chain(aws)
+            })
             .chain(std::iter::once(gateway_token.clone()))
             .collect();
         let prices = crate::usage::PriceTable::load(&config.usage.prices)

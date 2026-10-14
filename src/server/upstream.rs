@@ -93,10 +93,10 @@ pub async fn send(
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         h.insert(
             ACCEPT,
-            HeaderValue::from_static(if req.stream {
-                "text/event-stream"
-            } else {
-                "application/json"
+            HeaderValue::from_static(match (up.protocol, req.stream) {
+                (Protocol::Bedrock, true) => "application/vnd.amazon.eventstream",
+                (_, true) => "text/event-stream",
+                (_, false) => "application/json",
             }),
         );
         h.insert(
@@ -121,6 +121,9 @@ pub async fn send(
                 if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
                     h.insert("x-goog-api-key", k);
                 }
+            }
+            Protocol::Bedrock if up.aws.is_some() => {
+                sign_bedrock(up, req, h);
             }
             _ => {
                 if let Some(k) = up
@@ -147,6 +150,53 @@ pub async fn send(
                 headers: parts.headers,
                 body,
             })
+        }
+    }
+}
+
+/// Adds the Signature Version 4 headers for a Bedrock request. The key material is used here and
+/// nowhere else.
+fn sign_bedrock(up: &UpstreamRt, req: &UpstreamRequest, h: &mut HeaderMap) {
+    use airmate_core::outbound::sigv4::{amz_date, sign, Credentials, Request as SignRequest};
+    let Some(aws) = &up.aws else { return };
+    let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+    let authority = up
+        .base_url
+        .split_once("://")
+        .map_or(up.base_url.as_str(), |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let date = amz_date(now);
+    let signed = sign(
+        &Credentials {
+            access_key_id: aws.access_key_id.expose(),
+            secret_access_key: aws.secret_access_key.expose(),
+            session_token: aws
+                .session_token
+                .as_ref()
+                .map(crate::secret::Secret::expose),
+        },
+        &SignRequest {
+            method: "POST",
+            host: authority,
+            path,
+            query,
+            body: &req.body,
+            region: &aws.region,
+            service: "bedrock",
+            amz_date: &date,
+        },
+    );
+    for (k, v) in signed {
+        if let (Ok(name), Some(value)) = (
+            hyper::header::HeaderName::from_bytes(k.as_bytes()),
+            header_value(&v),
+        ) {
+            h.insert(name, value);
         }
     }
 }

@@ -13,7 +13,7 @@ use crate::outbound::{
     anthropic as passthrough, anthropic_build, anthropic_parse, chat, chat_parse, responses,
     responses_parse, ParseCtx, Target, UpstreamError, UpstreamRequest,
 };
-use crate::outbound::{gemini, gemini_parse};
+use crate::outbound::{bedrock, bedrock_parse, gemini, gemini_parse};
 use crate::policy::{Parsed, PolicyError};
 use crate::stream::anthropic_render::{render_message, AnthropicRender, RenderCtx};
 use crate::stream::chat_render::{render_completion, ChatRender};
@@ -219,13 +219,7 @@ pub fn build_request(ir: &IrRequest, target: &Target) -> Result<UpstreamRequest,
         Protocol::Responses => responses::build(ir, target),
         Protocol::Anthropic => anthropic_build::build(ir, target),
         Protocol::Gemini => gemini::build(ir, target),
-        other => Err(PolicyError {
-            field: "upstream.protocol".to_owned(),
-            message: format!(
-                "upstream protocol `{}` is not supported for this request",
-                other.as_str()
-            ),
-        }),
+        Protocol::Bedrock => bedrock::build(ir, target),
     }
 }
 
@@ -245,10 +239,7 @@ pub fn parse_response(
         Protocol::Responses => responses_parse::parse_response(status, body, ctx),
         Protocol::Anthropic => anthropic_parse::parse_response(status, body, ctx),
         Protocol::Gemini => gemini_parse::parse_response(status, body, ctx),
-        other => Err(UpstreamError::unreadable(format!(
-            "upstream protocol `{}` is not supported",
-            other.as_str()
-        ))),
+        Protocol::Bedrock => bedrock_parse::parse_response(status, body, ctx),
     }
 }
 
@@ -259,6 +250,7 @@ pub fn stream_parser(protocol: Protocol, ctx: ParseCtx) -> Box<dyn StreamParse> 
         Protocol::Responses => Box::new(responses_parse::ResponsesStream::new(ctx)),
         Protocol::Anthropic => Box::new(anthropic_parse::AnthropicStream::new(ctx)),
         Protocol::Gemini => Box::new(gemini_parse::GeminiStream::new(ctx)),
+        Protocol::Bedrock => Box::new(bedrock_parse::BedrockStream::new(ctx)),
         _ => Box::new(chat_parse::ChatStream::new(ctx)),
     }
 }
@@ -405,6 +397,7 @@ mod tests {
             (Protocol::Responses, "/v1/responses"),
             (Protocol::Anthropic, "/v1/messages"),
             (Protocol::Gemini, "/v1beta/models/m:generateContent"),
+            (Protocol::Bedrock, "/model/m/converse"),
         ] {
             assert_eq!(
                 build_request(&ir, &Target::new("u", p, Flavor::Generic, "m"))
@@ -413,11 +406,6 @@ mod tests {
                 path
             );
         }
-        assert!(build_request(
-            &ir,
-            &Target::new("u", Protocol::Bedrock, Flavor::Generic, "m")
-        )
-        .is_err());
     }
 
     #[test]
@@ -488,7 +476,13 @@ mod tests {
                 .content,
             vec![Part::Text("a".into())]
         );
-        assert!(parse_response(Protocol::Bedrock, 200, b"{}", &ctx).is_err());
+        let bed = br#"{"output":{"message":{"content":[{"text":"a"}]}},"stopReason":"end_turn"}"#;
+        assert_eq!(
+            parse_response(Protocol::Bedrock, 200, bed, &ctx)
+                .unwrap()
+                .content,
+            vec![Part::Text("a".into())]
+        );
         for p in [
             Protocol::Chat,
             Protocol::Responses,

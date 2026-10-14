@@ -314,6 +314,7 @@ impl Overrides {
             effort_levels: q.effort_levels.clone(),
             think_tags: None,
             proxy: None,
+            aws: None,
         };
         if let Some(t) = self.timeout_secs {
             upstream.timeouts.idle_secs = t;

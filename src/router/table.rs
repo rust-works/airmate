@@ -46,6 +46,43 @@ pub struct UpstreamRt {
     pub health_check: Option<(String, Duration)>,
     /// Request and token rate limits for this upstream.
     pub rate: Option<crate::config::schema::RateLimit>,
+    /// AWS credentials, when the upstream is Bedrock and signs with Signature Version 4.
+    pub aws: Option<AwsRt>,
+}
+
+/// Resolved AWS credentials for signing.
+#[derive(Debug)]
+pub struct AwsRt {
+    /// The access key id.
+    pub access_key_id: Secret,
+    /// The secret access key.
+    pub secret_access_key: Secret,
+    /// The session token, for temporary credentials.
+    pub session_token: Option<Secret>,
+    /// The region to sign for.
+    pub region: String,
+}
+
+/// The region in a `bedrock-runtime.<region>.amazonaws.com` host, if it is one.
+#[must_use]
+pub fn region_from_url(url: &str) -> Option<String> {
+    let host = url
+        .split("://")
+        .nth(1)?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?;
+    let rest = host.strip_prefix("bedrock-runtime")?;
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    let region = rest.trim_start_matches('.').split('.').next()?;
+    // `bedrock-runtime-fips.us-east-1.amazonaws.com` has a `fips` label before the region.
+    let region = if region == "fips" {
+        rest.trim_start_matches('.').split('.').nth(1)?
+    } else {
+        region
+    };
+    (!region.is_empty() && region != "amazonaws").then(|| region.to_owned())
 }
 
 impl UpstreamRt {
@@ -336,6 +373,30 @@ fn upstream_rt(
         }
         None => (None, None),
     };
+    let aws = match &u.aws {
+        Some(a) => {
+            let get = |name: &str, r: &crate::config::schema::SecretRef| {
+                resolver.resolve(r).map(|x| x.secret).map_err(|e| {
+                    ConfigError::new(format!("upstreams[{}].aws.{name}", u.name), e.to_string())
+                })
+            };
+            Some(AwsRt {
+                access_key_id: get("access_key_id", &a.access_key_id)?,
+                secret_access_key: get("secret_access_key", &a.secret_access_key)?,
+                session_token: a
+                    .session_token
+                    .as_ref()
+                    .map(|r| get("session_token", r))
+                    .transpose()?,
+                region: a
+                    .region
+                    .clone()
+                    .or_else(|| region_from_url(&u.url))
+                    .unwrap_or_default(),
+            })
+        }
+        None => None,
+    };
     Ok((
         UpstreamRt {
             name: u.name.clone(),
@@ -360,6 +421,7 @@ fn upstream_rt(
                 .as_ref()
                 .map(|h| (h.path.clone(), Duration::from_secs(h.interval_secs))),
             rate: u.rate,
+            aws,
         },
         warning,
     ))
@@ -386,6 +448,7 @@ mod tests {
             effort_levels: None,
             think_tags: None,
             proxy: None,
+            aws: None,
         }
     }
 
@@ -427,6 +490,33 @@ mod tests {
         match r {
             Resolution::Entry(e) | Resolution::Direct(e) => Some(e.targets[0].model.clone()),
             Resolution::NotFound => None,
+        }
+    }
+
+    #[test]
+    fn the_region_is_read_from_a_bedrock_runtime_url() {
+        for (url, want) in [
+            (
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                Some("us-east-1"),
+            ),
+            (
+                "https://bedrock-runtime.eu-central-1.amazonaws.com/",
+                Some("eu-central-1"),
+            ),
+            (
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+                Some("us-gov-west-1"),
+            ),
+            (
+                "https://bedrock-runtime.us-east-1.api.aws:443",
+                Some("us-east-1"),
+            ),
+            ("http://localhost:4566", None),
+            ("https://example.com", None),
+            ("not a url", None),
+        ] {
+            assert_eq!(region_from_url(url).as_deref(), want, "{url}");
         }
     }
 

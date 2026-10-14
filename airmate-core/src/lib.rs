@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod cache;
 pub mod error;
 pub mod estimate;
+pub mod eventstream;
 pub mod facts;
 pub mod flavor;
 pub mod inbound;
