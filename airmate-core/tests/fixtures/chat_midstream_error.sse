@@ -1,0 +1,4 @@
+data: {"id":"c7","model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":"Working on"},"finish_reason":null}]}
+
+data: {"error":{"message":"upstream overloaded, try again","type":"server_error"}}
+
