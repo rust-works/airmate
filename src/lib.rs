@@ -5,24 +5,9 @@
 //! calls it, and translates the answer back, streaming included.
 
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod keychain;
 pub mod router;
 pub mod secret;
 pub mod server;
-
-/// The line the `airmate` binary prints.
-#[must_use]
-pub fn greeting() -> &'static str {
-    "Hello, world!"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greeting_is_hello_world() {
-        assert_eq!(greeting(), "Hello, world!");
-    }
-}

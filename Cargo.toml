@@ -22,6 +22,10 @@ airmate-core = { path = "airmate-core", version = "0.1.0" }
 base64 = "0.23.1"
 # Byte buffers for request and response bodies.
 bytes = "1.12.1"
+# Command-line parsing (derive), with a minimal feature set.
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+# Shell completions, behind the `completions` feature.
+clap_complete = { version = "4.6.11", optional = true }
 # The OS CSPRNG for tokens and keys.
 getrandom = "0.4.3"
 # The Body trait for the streaming response body.
@@ -48,3 +52,8 @@ sha2 = "0.11.1"
 tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs"] }
 # Zero secrets on drop.
 zeroize = { version = "1.9.1", features = ["derive"] }
+
+[features]
+default = ["completions"]
+# `airmate completions <shell>`.
+completions = ["dep:clap_complete"]
