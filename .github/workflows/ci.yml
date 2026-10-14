@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  # Merge queue entries. The queue builds a `gh-readonly-queue/main/...` branch
+  # and waits for every required context on it; without this trigger none report
+  # and the entry times out and is ejected. Branch filters are not supported on
+  # this event.
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      # One flaky leg must not cancel the others and hide whether they are healthy.
+      fail-fast: false
+      matrix:
+        rust:
+          - stable
+          - beta
+          - nightly
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+    - uses: Swatinem/rust-cache@v2
+    - name: Run tests
+      run: cargo test --verbose
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    # Keep in step with `rust-version` in Cargo.toml and `msrv` in clippy.toml.
+    - uses: dtolnay/rust-toolchain@1.88.0
+    - uses: Swatinem/rust-cache@v2
+    - name: Build and test on the minimum supported Rust version
+      run: cargo test --verbose
+
+  cross-platform-build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, windows-latest ]
+    # Mirrors the release.yml targets so portability regressions are caught on
+    # every PR rather than only when a release tag is pushed.
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Build and test
+      run: cargo test --release --verbose
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Build docs
+      run: cargo doc --no-deps --document-private-items
+
+  coverage:
+    name: Coverage
+    # Skip on tag pushes: a tag has no PR and its commit was already validated
+    # on main, and the job would race the in-flight release.
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write        # required to post the coverage comment
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0          # full history so `git merge-base` can resolve the PR's fork point
+    # cargo-llvm-cov run, merge-base baseline, `patchcov diff` sticky PR comment,
+    # baseline publish on main, and the line gate, all packaged in one action.
+    - uses: action-works/patchcov-action@v1.0
+      with:
+        fail-under-lines: 30
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    # A prebuilt cargo-audit binary: `cargo install` would compile it from
+    # source every run, and rust-cache does not cache ~/.cargo/bin.
+    - uses: taiki-e/install-action@v2.87.27
+      with:
+        tool: cargo-audit
+    - name: Run cargo-audit
+      run: cargo audit
+
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+      with:
+        command: check all
+
+  secrets:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: TruffleHog scan
+      uses: trufflesecurity/trufflehog@main
+      with:
+        extra_args: --only-verified

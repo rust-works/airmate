@@ -1,0 +1,13 @@
+scopes:
+  - name: "ci"
+    description: "CI/CD pipelines and GitHub Actions workflows"
+    examples: ["ci: add coverage job", "ci: fix release pipeline"]
+    file_patterns: [".github/**"]
+  - name: "cli"
+    description: "Command-line interface and argument parsing"
+    examples: ["cli: add serve subcommand", "cli: improve help text"]
+    file_patterns: ["src/main.rs", "src/cli.rs", "src/cli/**"]
+  - name: "docs"
+    description: "Documentation"
+    examples: ["docs: expand the README"]
+    file_patterns: ["README.md", "CONTRIBUTING.md", "CHANGELOG.md", "docs/**"]

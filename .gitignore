@@ -1,0 +1,29 @@
+# Rust
+/target
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.*
+
+# Coverage
+lcov.info
+*.profraw
+*.profdata
+
+# Local omni-dev configuration overrides (personal settings)
+.omni-dev/local/

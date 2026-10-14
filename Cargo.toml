@@ -1,0 +1,15 @@
+[package]
+name = "airmate"
+version = "0.1.0"
+edition = "2021"
+authors = ["John Ky <newhoggy@gmail.com>"]
+license = "BSD-3-Clause"
+description = "A tool for routing AI requests."
+repository = "https://github.com/rust-works/airmate"
+documentation = "https://docs.rs/airmate"
+readme = "README.md"
+keywords = ["ai", "llm", "router", "gateway", "anthropic"]
+categories = ["command-line-utilities"]
+rust-version = "1.88.0"
+
+[dependencies]
