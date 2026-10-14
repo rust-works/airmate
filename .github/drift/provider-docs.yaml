@@ -1,0 +1,18 @@
+# Pages whose wording airmate's provider flavors rest on, and strings each must still contain.
+# `provider-doc-drift` fetches them weekly; a missing string means a human should re-read the page
+# and re-check the flavor (docs/translation.md, "Provider flavors").
+#
+# These sentinels were written from the documentation as understood on 2026-10-14 and have not yet
+# been checked against the live pages: the first scheduled run is that check. A page that fails to
+# fetch is reported as an error, not as a change.
+pages:
+  - name: fireworks-reasoning
+    url: https://docs.fireworks.ai/guides/reasoning
+    expect:
+      - reasoning_effort
+      - thinking
+  - name: fireworks-anthropic-compat
+    url: https://docs.fireworks.ai/tools-sdks/anthropic-compatibility
+    expect:
+      - anthropic
+      - messages

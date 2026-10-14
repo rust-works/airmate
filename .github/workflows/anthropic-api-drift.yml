@@ -1,0 +1,53 @@
+name: anthropic-api-drift
+
+# Anthropic publishes no machine-readable schema URL, but the official Python SDK's generated
+# `types/` modules are plain text. Compare them with the Anthropic field policy table weekly.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: Anthropic API drift
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Fetch the SDK's request types
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        mkdir -p sdk/beta
+        # List both directories first, then download in parallel with retries: there are well over
+        # a thousand small files and the raw host answers 503 now and then.
+        for dir in "" beta; do
+          gh api "repos/anthropics/anthropic-sdk-python/contents/src/anthropic/types/${dir}" --paginate \
+            --jq ".[] | select(.type == \"file\" and (.name | endswith(\".py\"))) | [\"sdk/${dir:+$dir/}\" + .name, .download_url] | @tsv"
+        done > files.tsv
+        test "$(wc -l < files.tsv)" -gt 100
+        awk -F'\t' '{print $1, $2}' files.tsv |
+          xargs -P 8 -n 2 sh -c 'curl -fsSL --retry 5 --retry-all-errors -o "$0" "$1"'
+    - name: Compare with the policy table
+      id: compare
+      run: |
+        set +e
+        cargo run --quiet -p airmate-drift -- anthropic sdk > report.md 2> errors.txt
+        status=$?
+        cat errors.txt >> report.md
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        cat report.md
+    - uses: ./.github/actions/drift-issue
+      with:
+        label: drift:anthropic-api
+        title: 'Anthropic API drift'
+        report: report.md
+        status: ${{ steps.compare.outputs.status }}
+        token: ${{ secrets.GITHUB_TOKEN }}

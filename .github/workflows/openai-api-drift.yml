@@ -1,0 +1,40 @@
+name: openai-api-drift
+
+# Compare OpenAI's published OpenAPI document with the Chat Completions and Responses field
+# policy tables weekly.
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: OpenAI API drift
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Fetch the OpenAPI document
+      run: curl -fsSL https://raw.githubusercontent.com/openai/openai-openapi/manual_spec/openapi.yaml -o openapi.yaml
+    - name: Compare with the policy tables
+      id: compare
+      run: |
+        set +e
+        cargo run --quiet -p airmate-drift -- openai openapi.yaml > report.md 2> errors.txt
+        status=$?
+        cat errors.txt >> report.md
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        cat report.md
+    - uses: ./.github/actions/drift-issue
+      with:
+        label: drift:openai-api
+        title: 'OpenAI API drift'
+        report: report.md
+        status: ${{ steps.compare.outputs.status }}
+        token: ${{ secrets.GITHUB_TOKEN }}

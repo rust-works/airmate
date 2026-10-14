@@ -1,0 +1,47 @@
+name: provider-doc-drift
+
+# Flavors with documented quirks (Fireworks) rest on provider pages. Fetch them weekly and check
+# the sentinel strings in .github/drift/provider-docs.yaml are still there.
+
+on:
+  schedule:
+    - cron: '29 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: Provider documentation drift
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Fetch the pages
+      run: |
+        set -euo pipefail
+        mkdir -p pages
+        # Each page is `name` and `url` in the sentinel file.
+        awk '/^  - name:/ {name=$3} /^    url:/ {print name, $2}' .github/drift/provider-docs.yaml |
+        while read -r name url; do
+          curl -fsSL --retry 3 "$url" -o "pages/${name}.html" || echo "could not fetch $url" >&2
+        done
+    - name: Check the sentinels
+      id: compare
+      run: |
+        set +e
+        cargo run --quiet -p airmate-drift -- provider-docs .github/drift/provider-docs.yaml pages > report.md 2> errors.txt
+        status=$?
+        cat errors.txt >> report.md
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        cat report.md
+    - uses: ./.github/actions/drift-issue
+      with:
+        label: drift:provider-docs
+        title: 'Provider documentation drift'
+        report: report.md
+        status: ${{ steps.compare.outputs.status }}
+        token: ${{ secrets.GITHUB_TOKEN }}

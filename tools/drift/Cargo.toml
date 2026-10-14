@@ -1,0 +1,17 @@
+[package]
+name = "airmate-drift"
+version = "0.1.0"
+edition = "2021"
+authors = ["John Ky <newhoggy@gmail.com>"]
+license = "BSD-3-Clause"
+description = "Drift detection for airmate: compares provider API definitions with airmate's field policy tables. Not published."
+repository = "https://github.com/rust-works/airmate"
+rust-version = "1.88.0"
+publish = false
+
+[dependencies]
+# The policy tables being compared.
+airmate-core = { path = "../../airmate-core", version = "0.1.0" }
+# Reads OpenAI's published OpenAPI document and the sentinel list.
+serde_norway = "0.9.42"
+serde = { version = "1.0.229", features = ["derive"] }

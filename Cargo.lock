@@ -42,6 +42,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "airmate-drift"
+version = "0.1.0"
+dependencies = [
+ "airmate-core",
+ "serde",
+ "serde_norway",
+]
+
+[[package]]
 name = "anstyle"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

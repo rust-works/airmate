@@ -1,0 +1,37 @@
+name: catalog-drift
+
+# The shipped capability catalog is dated. Flag it when nobody has looked at it for a while.
+
+on:
+  schedule:
+    - cron: '35 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: Model catalog age
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Check the catalog's age
+      id: compare
+      run: |
+        set +e
+        cargo run --quiet -p airmate-drift -- catalog src/router/catalog.yaml --max-age-days 90 > report.md 2> errors.txt
+        status=$?
+        cat errors.txt >> report.md
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        cat report.md
+    - uses: ./.github/actions/drift-issue
+      with:
+        label: drift:catalog
+        title: 'Model catalog is out of date'
+        report: report.md
+        status: ${{ steps.compare.outputs.status }}
+        token: ${{ secrets.GITHUB_TOKEN }}
