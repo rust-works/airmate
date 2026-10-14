@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod estimate;
+pub mod inbound;
 pub mod ir;
 pub mod policy;
 pub mod signature;
