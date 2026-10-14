@@ -14,4 +14,5 @@ pub mod outbound;
 pub mod policy;
 pub mod signature;
 pub mod sse;
+pub mod stream;
 pub mod toolname;
