@@ -72,6 +72,24 @@ jobs:
     - name: Build and test
       run: cargo test --workspace --release --verbose
 
+  features:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    # The optional features (`tls`, `otel`, `completions`) must each build alone and not at all.
+    - name: Build with no default features
+      run: cargo check --workspace --all-targets --no-default-features
+    - name: Test with no default features
+      run: cargo test --workspace --no-default-features
+    - name: Build with each feature alone
+      run: |
+        for f in tls otel completions; do
+          cargo check -p airmate --all-targets --no-default-features --features "$f"
+        done
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
