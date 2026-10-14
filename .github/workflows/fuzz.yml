@@ -1,0 +1,50 @@
+name: fuzz
+
+# Coverage-guided fuzzing of the byte-level entry points: the SSE parser, every upstream stream
+# parser, the inbound request parsers, the AWS event stream decoder and the reply parsers. None may
+# panic or grow without bound. Runs weekly; the same entry points also run under proptest in the
+# normal test suite.
+
+on:
+  schedule:
+    - cron: '41 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [sse_parser, stream_parsers, inbound_parsers, event_stream, replies]
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@nightly
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: fuzz
+    - uses: taiki-e/install-action@v2.87.27
+      with:
+        tool: cargo-fuzz
+    - name: Fuzz
+      working-directory: fuzz
+      run: |
+        # Start from the committed seeds; libFuzzer writes what it finds into the corpus directory,
+        # not into the repository.
+        mkdir -p corpus/${{ matrix.target }}
+        cp seeds/${{ matrix.target }}/* corpus/${{ matrix.target }}/
+        cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ inputs.seconds || '300' }} -max_len=8192
+    - name: Keep what it found
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ matrix.target }}-crash
+        path: fuzz/artifacts/${{ matrix.target }}

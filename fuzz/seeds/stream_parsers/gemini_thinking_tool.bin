@@ -1,0 +1,8 @@
+ƒdata: {"candidates":[{"content":{"role":"model","parts":[{"text":"The user wants weather. ","thought":true}]},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"resp_fixture","usageMetadata":{"promptTokenCount":30,"totalTokenCount":30}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"I should call the tool.","thought":true}]},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"resp_fixture","usageMetadata":{"promptTokenCount":30,"totalTokenCount":39,"candidatesTokenCount":0,"thoughtsTokenCount":9}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Let me check.","thoughtSignature":"c2lnbmF0dXJl"}]},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"resp_fixture","usageMetadata":{"promptTokenCount":30,"totalTokenCount":42,"candidatesTokenCount":3,"thoughtsTokenCount":9}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris","units":"c"}}},{"functionCall":{"name":"get_time","args":{"tz":"CET"}}}]},"index":0,"finishReason":"STOP"}],"modelVersion":"gemini-2.5-flash","responseId":"resp_fixture","usageMetadata":{"promptTokenCount":30,"totalTokenCount":64,"candidatesTokenCount":25,"thoughtsTokenCount":9}}
+

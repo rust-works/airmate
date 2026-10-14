@@ -1,0 +1,50 @@
+[package]
+name = "airmate-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+airmate-core = { path = "../airmate-core" }
+
+# Its own workspace: the fuzz crate needs nightly and is built only by `cargo fuzz`.
+[workspace]
+
+[[bin]]
+name = "sse_parser"
+path = "fuzz_targets/sse_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream_parsers"
+path = "fuzz_targets/stream_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inbound_parsers"
+path = "fuzz_targets/inbound_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "event_stream"
+path = "fuzz_targets/event_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replies"
+path = "fuzz_targets/replies.rs"
+test = false
+doc = false
+bench = false
