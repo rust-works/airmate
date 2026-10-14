@@ -5,10 +5,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cache;
 pub mod estimate;
 pub mod flavor;
 pub mod inbound;
 pub mod ir;
+pub mod outbound;
 pub mod policy;
 pub mod signature;
 pub mod sse;

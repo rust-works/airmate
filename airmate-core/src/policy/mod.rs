@@ -240,6 +240,12 @@ impl Policy {
         }
     }
 
+    /// A policy with no table, only collecting drops made while building an upstream request.
+    #[must_use]
+    pub fn collector() -> Self {
+        Self::new(&[], PolicyConfig::default())
+    }
+
     /// The table row for `group`/`name`, if any.
     #[must_use]
     pub fn lookup(&self, group: Group, name: &str) -> Option<&'static Entry> {
