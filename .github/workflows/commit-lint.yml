@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Merge queue entries. Branch filters are not supported on this event.
+  merge_group:
 
 permissions:
   contents: read
@@ -27,3 +29,6 @@ jobs:
         with:
           command: lint
           strict: true
+          # The action only derives a range for pull_request events. For a
+          # merge-queue entry, lint exactly the commits the queue adds to main.
+          commit-range: ${{ github.event_name == 'merge_group' && format('{0}..{1}', github.event.merge_group.base_sha, github.event.merge_group.head_sha) || '' }}
