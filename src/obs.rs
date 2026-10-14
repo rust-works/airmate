@@ -74,6 +74,8 @@ pub struct RequestRecord {
     pub est_cost_usd: Option<f64>,
     /// Targets the router skipped, as `target:reason`.
     pub skipped: Vec<String>,
+    /// The field the field policy refused the request for, if it did.
+    pub rejected: Option<String>,
 }
 
 /// Receives records. An extension trait of the library API.

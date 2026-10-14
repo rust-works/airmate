@@ -96,6 +96,8 @@ pub struct GatewayError {
     pub retry_after: Option<u64>,
     /// The request id, also in the body.
     pub request_id: Option<String>,
+    /// The request field the field policy refused, if this is a policy rejection.
+    pub policy_field: Option<String>,
 }
 
 /// What names an upstream in a message.
@@ -127,6 +129,7 @@ impl GatewayError {
             message: message.into(),
             retry_after: None,
             request_id: None,
+            policy_field: None,
         }
     }
 
@@ -205,7 +208,9 @@ impl GatewayError {
     /// A policy rejection: `400 invalid_request_error` naming the field.
     #[must_use]
     pub fn from_policy(e: &PolicyError) -> Self {
-        Self::new(ErrorKind::InvalidRequest, e.message.clone())
+        let mut err = Self::new(ErrorKind::InvalidRequest, e.message.clone());
+        err.policy_field = Some(e.field.clone());
+        err
     }
 
     /// Maps an upstream answer.

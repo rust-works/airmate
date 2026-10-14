@@ -118,6 +118,11 @@ impl Recorder {
         });
     }
 
+    /// The field the field policy refused the request for.
+    pub fn rejected(&self, field: &str) {
+        self.with(|s| s.rec.rejected = Some(field.to_owned()));
+    }
+
     /// The estimated cost.
     pub fn cost(&self, usd: Option<f64>) {
         self.with(|s| s.rec.est_cost_usd = usd);

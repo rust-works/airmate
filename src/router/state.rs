@@ -229,6 +229,24 @@ impl RouterState {
             .clone()
     }
 
+    /// Every target seen so far, by label.
+    ///
+    /// # Panics
+    ///
+    /// If an internal lock is poisoned.
+    #[must_use]
+    pub fn targets_snapshot(&self) -> Vec<(String, Arc<TargetState>)> {
+        let mut v: Vec<_> = self
+            .targets
+            .lock()
+            .expect("targets lock")
+            .iter()
+            .map(|(k, t)| (k.clone(), t.clone()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
     /// The health record for an upstream, created on first use.
     ///
     /// # Panics

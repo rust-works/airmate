@@ -13,7 +13,13 @@ struct Home(PathBuf);
 
 impl Home {
     fn new(name: &str) -> Self {
-        let d = std::env::temp_dir().join(format!("airmate-cli-{}-{name}", std::process::id()));
+        // Short, because the admin socket lives under it and socket paths are limited to ~100 bytes.
+        let base = if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let d = base.join(format!("am-cli-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Self(d)
@@ -907,7 +913,7 @@ fn keys_add_shows_the_key_once_and_stores_only_its_hash() {
     assert!(o.status.success(), "{}", errs(&o));
     let key = key_from(&out(&o));
     assert!(key.len() > 40);
-    assert!(out(&o).contains("shown once") && out(&o).contains("reload"));
+    assert!(out(&o).contains("shown once") && out(&o).contains("No gateway is running"));
     let file = std::fs::read_to_string(h.0.join("config/airmate/clients.yaml")).unwrap();
     assert!(
         file.contains("name: ci")
@@ -1152,4 +1158,123 @@ fn usage_explains_an_empty_ledger_and_rejects_a_bad_since() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(errs(&o).contains("--since"), "{}", errs(&o));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_reload_and_keys_talk_to_the_running_gateway_over_the_admin_socket() {
+    let mock = Mock::start(|_| {
+        Reply::json(
+            200,
+            serde_json::json!({"id": "c", "model": "m", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+        )
+    })
+    .await;
+    let h = Home::new("admin");
+    let port = free_port();
+    let good = format!("server:\n  port: {port}\nupstreams:\n  - {{ name: up, url: \"{}\" }}\nmodels:\n  - {{ match: \"*\", targets: [ {{ upstream: up, model: m }} ] }}\n", mock.url());
+    h.write_config(&good);
+
+    // Nothing is running yet: status is "unhealthy" (3), reload is a runtime error (1).
+    let o = h.cmd().arg("status").output().unwrap();
+    assert_eq!(o.status.code(), Some(3), "{}", errs(&o));
+    assert!(errs(&o).contains("not running"), "{}", errs(&o));
+    assert_eq!(
+        h.cmd().arg("reload").output().unwrap().status.code(),
+        Some(1)
+    );
+
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = KillOnDrop(h.cmd().arg("serve").stderr(Stdio::piped()).spawn().unwrap());
+    wait_until_listening(port);
+    let socket = h.0.join("state/airmate/run/admin.sock");
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(socket.exists(), "serve opens the admin socket");
+
+    let o = h.cmd().arg("status").output().unwrap();
+    assert!(o.status.success(), "{}{}", out(&o), errs(&o));
+    assert!(
+        out(&o).contains("upstream up") && out(&o).contains("up/m")
+            || out(&o).contains("upstream up"),
+        "{}",
+        out(&o)
+    );
+    let o = h
+        .cmd()
+        .args(["status", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["listen"], format!("127.0.0.1:{port}"));
+
+    // A good reload succeeds; a bad one is rejected with exit 2 and the old config keeps serving.
+    let o = h.cmd().arg("reload").output().unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(
+        out(&o).contains("reloaded the running gateway"),
+        "{}",
+        out(&o)
+    );
+    h.write_config("server:\n  max_concurrent: 0\n");
+    let o = h.cmd().arg("reload").output().unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", out(&o));
+    assert!(
+        errs(&o).contains("keeps the previous one") && errs(&o).contains("max_concurrent"),
+        "{}",
+        errs(&o)
+    );
+    h.write_config(&good);
+
+    // A key made while the gateway runs works at once, and revoking it stops it at once.
+    let o = h.cmd().args(["keys", "add", "ci"]).output().unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(
+        out(&o).contains("reloaded the running gateway"),
+        "{}",
+        out(&o)
+    );
+    let key = key_from(&out(&o));
+    let body =
+        r#"{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+    assert_eq!(http(port, "POST", "/v1/messages", Some(&key), body).0, 200);
+    let o = h.cmd().args(["keys", "revoke", "ci"]).output().unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(
+        out(&o).contains("reloaded the running gateway"),
+        "{}",
+        out(&o)
+    );
+    assert_eq!(
+        http(port, "POST", "/v1/messages", Some(&key), body).0,
+        401,
+        "a revoked key stops working on reload"
+    );
+
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.0.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "serve did not stop");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!socket.exists(), "the admin socket is removed on shutdown");
+    assert_eq!(
+        h.cmd().arg("status").output().unwrap().status.code(),
+        Some(3)
+    );
 }

@@ -4,10 +4,12 @@
 //! the OpenAI Responses API) to airmate, which translates the request, picks an upstream model,
 //! calls it, and translates the answer back, streaming included.
 
+pub mod admin;
 pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod keychain;
+pub mod metrics;
 pub mod obs;
 pub mod router;
 pub mod secret;

@@ -51,6 +51,9 @@ pub(super) fn fail_with(
     e: GatewayError,
     extra: &[(&'static str, String)],
 ) -> Response<GwBody> {
+    if let Some(field) = &e.policy_field {
+        route.rec.rejected(field);
+    }
     let mut resp = error_response(route.inbound, &e.with_request_id(route.rid.clone()));
     for (k, v) in extra {
         if let Ok(v) = hyper::header::HeaderValue::from_str(v) {
@@ -595,6 +598,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     let mut attempts: u32 = 0;
     let mut last: Option<Failure> = None;
     let mut ignored_so_far: Vec<Ignored> = Vec::new();
+    let mut failed_from: Option<String> = None;
 
     'targets: for planned_target in &planned.targets {
         let target = &planned_target.target;
@@ -678,6 +682,14 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                 break 'targets;
             }
             attempts += 1;
+            if let Some(from) = failed_from.take() {
+                if from != target.label() {
+                    route.shared.metrics.inc(
+                        "airmate_failovers_total",
+                        &[("from", &from), ("to", &target.label())],
+                    );
+                }
+            }
             planned_target
                 .state
                 .inflight
@@ -733,6 +745,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                         return fail_with(&route, f.error, &headers);
                     }
                     guard.armed = false;
+                    failed_from = Some(target.label());
                     if f.auth {
                         // The key is wrong; hammering it is harmful. Open the circuit and tell the operator.
                         planned_target.state.breaker.trip(now, &f.error.message);

@@ -70,11 +70,24 @@ fn save_key(path: &Path, key: &str) -> Result<(), CliError> {
         .map_err(|e| CliError::runtime(format!("cannot save the key: {e}")))
 }
 
-fn reload_hint(out: &mut dyn Write) -> Result<(), CliError> {
-    writeln!(
-        out,
-        "A running gateway picks this up on its next reload (SIGHUP) or restart."
-    )
+/// Tells a running gateway to pick the change up. Revocation takes effect on reload, so a
+/// revoked key stops working as soon as this returns.
+fn reload_hint(dirs: &crate::config::paths::Dirs, out: &mut dyn Write) -> Result<(), CliError> {
+    let socket = dirs.admin_socket();
+    if !socket.exists() {
+        return writeln!(
+            out,
+            "No gateway is running; the change applies when one starts."
+        )
+        .map_err(io);
+    }
+    match super::admin_cmd::reload_running(&socket) {
+        Ok(msg) => writeln!(out, "{msg}."),
+        Err(e) => writeln!(
+            out,
+            "warning: the change is saved but the running gateway was not reloaded: {e}\nRun `airmate reload` once the configuration is fixed."
+        ),
+    }
     .map_err(io)
 }
 
@@ -155,7 +168,7 @@ pub fn add(
         )
         .map_err(io)?;
     }
-    reload_hint(out)
+    reload_hint(&loaded.dirs, out)
 }
 
 /// `keys list`.
@@ -266,7 +279,7 @@ pub fn revoke(
         .map_err(|e| CliError::runtime(e.to_string()))?;
     let _ = std::fs::remove_file(loaded.dirs.client_key_file(name));
     writeln!(out, "client `{name}` revoked.").map_err(io)?;
-    reload_hint(out)
+    reload_hint(&loaded.dirs, out)
 }
 
 /// `keys rotate`: a new key, the same settings.
@@ -293,5 +306,5 @@ pub fn rotate(
         save_key(&loaded.dirs.client_key_file(name), &key)?;
     }
     writeln!(out, "client `{name}` has a new key. It is shown once; store it now:\n\n{key}\n\nThe old key stops working on the next reload.").map_err(io)?;
-    reload_hint(out)
+    reload_hint(&loaded.dirs, out)
 }

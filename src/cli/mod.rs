@@ -1,5 +1,6 @@
 //! The command line.
 
+pub mod admin_cmd;
 pub mod common;
 pub mod env_cmd;
 pub mod keys_cmd;
@@ -57,6 +58,14 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Show the state of the running gateway; exits 3 if it is down or unhealthy.
+    Status {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: StatusFormat,
+    },
+    /// Ask the running gateway to re-read its configuration.
+    Reload,
     /// Show token usage and cost from the usage ledger.
     Usage(UsageArgs),
     /// Create, list, revoke and rotate client keys.
@@ -221,6 +230,15 @@ pub enum UsageFormat {
     Json,
 }
 
+/// How `status` prints.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum StatusFormat {
+    /// For people.
+    Text,
+    /// JSON.
+    Json,
+}
+
 /// `usage` arguments.
 #[derive(Debug, Args)]
 pub struct UsageArgs {
@@ -376,6 +394,15 @@ fn dispatch(
             KeysAction::Revoke { name } => keys_cmd::revoke(p, global, name, out),
             KeysAction::Rotate { name, save } => keys_cmd::rotate(p, global, name, *save, out),
         },
+        Command::Status { format } => admin_cmd::status(
+            p,
+            match format {
+                StatusFormat::Text => admin_cmd::Format::Text,
+                StatusFormat::Json => admin_cmd::Format::Json,
+            },
+            out,
+        ),
+        Command::Reload => admin_cmd::reload(p, out),
         Command::Usage(a) => usage_cmd::usage(
             p,
             global,

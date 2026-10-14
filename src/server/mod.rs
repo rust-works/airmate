@@ -229,6 +229,12 @@ pub struct Shared {
     pub usage: Arc<dyn UsageSink>,
     /// Spend per client, for budgets.
     pub budgets: Budgets,
+    /// Counters and histograms behind `/metrics`.
+    pub metrics: Arc<crate::metrics::Metrics>,
+    /// When the gateway started.
+    pub started: std::time::Instant,
+    /// The address the gateway listens on.
+    pub listen: SocketAddr,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -338,13 +344,17 @@ pub async fn bind_with_deps(
     let local = listener
         .local_addr()
         .map_err(|e| BindError(e.to_string()))?;
+    let metrics = crate::metrics::Metrics::new();
     let shared = Arc::new(Shared {
         guard: GuardConfig {
             bound_port: Some(local.port()),
             allowed_hosts: config.server.allowed_hosts.clone(),
         },
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
-        log,
+        log: Arc::new(crate::metrics::MeteredSink::new(log, metrics.clone())),
+        metrics,
+        started: std::time::Instant::now(),
+        listen: local,
         limits: crate::router::limits::Limits::new(clock.clone()),
         usage: Arc::new(NullUsage),
         budgets: Budgets::new(),

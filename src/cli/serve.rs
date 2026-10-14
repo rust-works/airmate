@@ -9,7 +9,7 @@ use super::common::{gateway_token, load, CliError, Global, Process};
 use crate::config::overrides::Overrides;
 use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
 use crate::secret::SystemResolver;
-use crate::server::reload::reload;
+use crate::server::reload::{reload, ReloadReport};
 use crate::server::{bind_with, Tables};
 use crate::usage::{NullUsage, UsageRecord, UsageSink};
 
@@ -60,18 +60,46 @@ pub fn serve(
         );
         let (tx, rx) = watch::channel(false);
         let shared = gw.shared();
-        let serving = tokio::spawn(gw.serve(rx));
+        let serving = tokio::spawn(gw.serve(rx.clone()));
         let reload_ctx = ReloadCtx {
             p,
             global,
             flags: &flags_for_reload,
         };
-        while let Signal::Reload = wait_for_signal().await {
-            reload_now(&shared, &reload_ctx, err);
+        // Reloads asked for over the admin socket are carried out here, on the same code path as
+        // SIGHUP, so both print the same messages and keep the old tables when a config is bad.
+        let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel::<
+            tokio::sync::oneshot::Sender<Result<ReloadReport, String>>,
+        >();
+        let reload_fn: crate::admin::ReloadFn = Arc::new(move || {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            reload_tx
+                .send(tx)
+                .map_err(|_| "the gateway is shutting down".to_owned())?;
+            rx.blocking_recv()
+                .map_err(|_| "the gateway is shutting down".to_owned())?
+        });
+        let admin = start_admin(&loaded.dirs.admin_socket(), &shared, reload_fn, &rx, err);
+        let mut signals = Signals::new();
+        loop {
+            tokio::select! {
+                signal = signals.next() => match signal {
+                    Signal::Reload => {
+                        let _ = reload_now(&shared, &reload_ctx, err);
+                    }
+                    Signal::Stop => break,
+                },
+                Some(reply) = reload_rx.recv() => {
+                    let _ = reply.send(reload_now(&shared, &reload_ctx, err));
+                }
+            }
         }
         let _ = writeln!(err, "airmate: shutting down");
         let _ = tx.send(true);
         let _ = serving.await;
+        if let Some(admin) = admin {
+            let _ = admin.await;
+        }
         Ok(())
     })
 }
@@ -83,7 +111,11 @@ struct ReloadCtx<'a> {
 }
 
 /// Re-reads the configuration and swaps it in; a bad one is reported and the old one stays.
-fn reload_now(shared: &crate::server::Shared, ctx: &ReloadCtx<'_>, err: &mut dyn Write) {
+fn reload_now(
+    shared: &crate::server::Shared,
+    ctx: &ReloadCtx<'_>,
+    err: &mut dyn Write,
+) -> Result<ReloadReport, String> {
     let result = (|| -> Result<_, String> {
         let loaded = load(ctx.p, ctx.global, ctx.flags.clone()).map_err(|e| e.to_string())?;
         let token = gateway_token(ctx.p, &loaded).map_err(|e| e.to_string())?;
@@ -91,13 +123,13 @@ fn reload_now(shared: &crate::server::Shared, ctx: &ReloadCtx<'_>, err: &mut dyn
         reload(shared, loaded.resolved.config, &resolver, &token)
             .map_err(|errs| crate::config::ConfigErrors(errs).to_string())
     })();
-    match result {
+    match &result {
         Ok(report) => {
             let _ = writeln!(err, "airmate: reloaded the configuration");
-            for w in report.warnings {
+            for w in &report.warnings {
                 let _ = writeln!(err, "airmate: warning: {w}");
             }
-            for s in report.restart_required {
+            for s in &report.restart_required {
                 let _ = writeln!(
                     err,
                     "airmate: warning: {s} changed but only takes effect after a restart"
@@ -111,6 +143,47 @@ fn reload_now(shared: &crate::server::Shared, ctx: &ReloadCtx<'_>, err: &mut dyn
             );
         }
     }
+    result
+}
+
+/// Starts the admin interface. A gateway that cannot offer one still serves: the failure is
+/// reported and the data plane carries on.
+#[cfg(unix)]
+fn start_admin(
+    path: &std::path::Path,
+    shared: &Arc<crate::server::Shared>,
+    reload: crate::admin::ReloadFn,
+    shutdown: &watch::Receiver<bool>,
+    err: &mut dyn Write,
+) -> Option<tokio::task::JoinHandle<()>> {
+    match crate::admin::bind(path) {
+        Ok(listener) => Some(tokio::spawn(crate::admin::serve(
+            listener,
+            path.to_owned(),
+            shared.clone(),
+            reload,
+            shutdown.clone(),
+        ))),
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "airmate: warning: no admin socket at {}: {e}; `airmate status` and `airmate reload` will not work",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn start_admin(
+    _: &std::path::Path,
+    _: &Arc<crate::server::Shared>,
+    _: crate::admin::ReloadFn,
+    _: &watch::Receiver<bool>,
+    _: &mut dyn Write,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 /// What woke the server up.
@@ -119,28 +192,54 @@ enum Signal {
     Stop,
 }
 
-#[cfg(unix)]
-async fn wait_for_signal() -> Signal {
-    use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
-        signal(SignalKind::terminate()),
-        signal(SignalKind::interrupt()),
-        signal(SignalKind::hangup()),
-    ) else {
-        std::future::pending::<()>().await;
-        return Signal::Stop;
-    };
-    tokio::select! {
-        _ = term.recv() => Signal::Stop,
-        _ = int.recv() => Signal::Stop,
-        _ = hup.recv() => Signal::Reload,
-    }
+/// The signals the gateway reacts to.
+struct Signals {
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    int: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hup: Option<tokio::signal::unix::Signal>,
 }
 
-#[cfg(not(unix))]
-async fn wait_for_signal() -> Signal {
-    let _ = tokio::signal::ctrl_c().await;
-    Signal::Stop
+impl Signals {
+    #[cfg(unix)]
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        Self {
+            term: signal(SignalKind::terminate()).ok(),
+            int: signal(SignalKind::interrupt()).ok(),
+            hup: signal(SignalKind::hangup()).ok(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> Self {
+        Self {}
+    }
+
+    #[cfg(unix)]
+    async fn next(&mut self) -> Signal {
+        async fn on(s: &mut Option<tokio::signal::unix::Signal>) {
+            match s {
+                Some(s) => {
+                    s.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        }
+        tokio::select! {
+            () = on(&mut self.term) => Signal::Stop,
+            () = on(&mut self.int) => Signal::Stop,
+            () = on(&mut self.hup) => Signal::Reload,
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn next(&mut self) -> Signal {
+        let _ = tokio::signal::ctrl_c().await;
+        Signal::Stop
+    }
 }
 
 /// Opens the usage ledger if the configuration asks for one, and reads what is already in it so
