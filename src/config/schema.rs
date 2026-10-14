@@ -72,6 +72,8 @@ pub struct Config {
     pub rules: Vec<RuleConfig>,
     /// Authenticated client identities.
     pub clients: Vec<ClientConfig>,
+    /// Overrides for the built-in capability catalog.
+    pub catalog: Vec<CatalogOverride>,
     /// Circuit breaker defaults.
     pub circuit: CircuitConfig,
     /// Retry and failover limits.
@@ -662,6 +664,48 @@ pub struct ClientConfig {
     /// A model entry to fall back to when the budget is exhausted, instead of answering 429.
     #[serde(default)]
     pub budget_fallback: Option<String>,
+}
+
+/// `catalog:` an override of what a model can do. Only the fields set are overridden.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogOverride {
+    /// A glob over upstream model names.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// The context window, in tokens.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// The most output tokens the model can produce.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// Tool calling.
+    #[serde(default)]
+    pub tools: Option<bool>,
+    /// Several tool calls in one turn.
+    #[serde(default)]
+    pub parallel_tools: Option<bool>,
+    /// Image input.
+    #[serde(default)]
+    pub vision: Option<bool>,
+    /// Document input.
+    #[serde(default)]
+    pub documents: Option<bool>,
+    /// Reasoning.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    /// A reasoning effort control.
+    #[serde(default)]
+    pub effort: Option<bool>,
+    /// Structured (JSON schema) output.
+    #[serde(default)]
+    pub structured_output: Option<bool>,
+    /// Streaming.
+    #[serde(default)]
+    pub streaming: Option<bool>,
+    /// List prices.
+    #[serde(default)]
+    pub price: Option<Price>,
 }
 
 /// `circuit:` breaker defaults.

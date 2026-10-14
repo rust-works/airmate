@@ -1,6 +1,7 @@
 //! Routing: which upstream and model serves a request.
 
 pub mod breaker;
+pub mod catalog;
 pub mod clock;
 pub mod glob;
 pub mod table;

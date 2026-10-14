@@ -380,6 +380,20 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
         }
     }
 
+    for (i, o) in c.catalog.iter().enumerate() {
+        if o.pattern.is_empty() {
+            out.push(ConfigError::new(
+                format!("catalog[{i}].match"),
+                "must not be empty",
+            ));
+        }
+        if o.context_window == Some(0) || o.max_output_tokens == Some(0) {
+            out.push(ConfigError::new(
+                format!("catalog[{i}]"),
+                "context_window and max_output_tokens must be at least 1",
+            ));
+        }
+    }
     if c.circuit.failure_threshold == 0 {
         out.push(ConfigError::new(
             "circuit.failure_threshold",
