@@ -4,6 +4,7 @@ pub mod admin_cmd;
 pub mod common;
 pub mod env_cmd;
 pub mod keys_cmd;
+pub mod logs_cmd;
 pub mod route_cmd;
 pub mod run_cmd;
 pub mod serve;
@@ -66,6 +67,8 @@ pub enum Command {
     },
     /// Ask the running gateway to re-read its configuration.
     Reload,
+    /// Search and print the request log.
+    Logs(LogsArgs),
     /// Show token usage and cost from the usage ledger.
     Usage(UsageArgs),
     /// Create, list, revoke and rotate client keys.
@@ -239,6 +242,41 @@ pub enum StatusFormat {
     Json,
 }
 
+/// How `logs` prints.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LogsFormat {
+    /// One line per record.
+    Oneline,
+    /// JSON, one record per line.
+    Json,
+}
+
+/// `logs` arguments.
+#[derive(Debug, Args)]
+pub struct LogsArgs {
+    /// Keep watching for new records.
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+    /// Only this client.
+    #[arg(long)]
+    pub client: Option<String>,
+    /// Only this status (`404`) or class (`5xx`).
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Only records since a span back from now (`1h`, `7d`) or a UTC date.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Show only the last N matching records.
+    #[arg(long, short = 'n')]
+    pub lines: Option<usize>,
+    /// Include each upstream attempt and classifier call, not just the requests.
+    #[arg(long)]
+    pub attempts: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value = "oneline")]
+    pub format: LogsFormat,
+}
+
 /// `usage` arguments.
 #[derive(Debug, Args)]
 pub struct UsageArgs {
@@ -403,6 +441,35 @@ fn dispatch(
             out,
         ),
         Command::Reload => admin_cmd::reload(p, out),
+        Command::Logs(a) => {
+            let status = a
+                .status
+                .as_deref()
+                .map(|s| {
+                    crate::obs::StatusFilter::parse(s)
+                        .map_err(|e| CliError::usage(format!("--status: {e}")))
+                })
+                .transpose()?;
+            logs_cmd::logs(
+                p,
+                logs_cmd::Options {
+                    filter: logs_cmd::Filter {
+                        client: a.client.clone(),
+                        status,
+                        since: None,
+                        all_kinds: a.attempts,
+                    },
+                    format: match a.format {
+                        LogsFormat::Oneline => logs_cmd::Format::Oneline,
+                        LogsFormat::Json => logs_cmd::Format::Json,
+                    },
+                    follow: a.follow,
+                    tail: a.lines,
+                    since: a.since.as_deref(),
+                },
+                out,
+            )
+        }
         Command::Usage(a) => usage_cmd::usage(
             p,
             global,

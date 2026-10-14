@@ -1278,3 +1278,129 @@ async fn status_reload_and_keys_talk_to_the_running_gateway_over_the_admin_socke
         Some(3)
     );
 }
+
+fn write_request_log(h: &Home) -> PathBuf {
+    let dir = h.0.join("state/airmate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("requests.jsonl");
+    let line = |kind: &str, client: &str, status: u16, ts: &str, id: &str| {
+        format!("{{\"kind\":\"{kind}\",\"ts\":\"{ts}\",\"request_id\":\"{id}\",\"client\":\"{client}\",\"inbound\":\"anthropic\",\"model_asked\":\"claude-x\",\"target\":\"up/m\",\"status\":{status},\"total_ms\":10}}\n")
+    };
+    let text = [
+        line("request", "ci", 200, "2026-10-14T10:00:00.000Z", "r1"),
+        line("attempt", "ci", 200, "2026-10-14T10:00:00.000Z", "r1"),
+        line("request", "ci", 503, "2026-10-14T11:00:00.000Z", "r2"),
+        line("request", "laptop", 404, "2026-10-14T12:00:00.000Z", "r3"),
+    ]
+    .concat()
+        + "not a record\n";
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn logs_filters_by_client_status_and_time_and_prints_json_on_request() {
+    let h = Home::new("logs");
+    // Before the first request there is no log: say so rather than printing nothing.
+    let o = h.cmd().arg("logs").output().unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(errs(&o).contains("no request log"), "{}", errs(&o));
+
+    write_request_log(&h);
+    let all = out(&h.cmd().arg("logs").output().unwrap());
+    assert_eq!(
+        all.lines().count(),
+        3,
+        "attempts are hidden by default:\n{all}"
+    );
+    assert!(
+        all.contains("503 anthropic client=ci claude-x -> up/m 10ms"),
+        "{all}"
+    );
+
+    let o = h.cmd().args(["logs", "--attempts"]).output().unwrap();
+    assert_eq!(out(&o).lines().count(), 4);
+    let o = h
+        .cmd()
+        .args(["logs", "--client", "laptop"])
+        .output()
+        .unwrap();
+    assert_eq!(out(&o).lines().count(), 1);
+    let o = h.cmd().args(["logs", "--status", "5xx"]).output().unwrap();
+    assert!(
+        out(&o).contains("503") && out(&o).lines().count() == 1,
+        "{}",
+        out(&o)
+    );
+    let o = h
+        .cmd()
+        .args(["logs", "--status", "404", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(out(&o).trim()).unwrap();
+    assert_eq!(v["request_id"], "r3");
+    let o = h
+        .cmd()
+        .args(["logs", "--since", "2026-10-14", "-n", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(out(&o).lines().count(), 1);
+    assert!(
+        out(&o).contains("404"),
+        "the last match is kept: {}",
+        out(&o)
+    );
+    let o = h
+        .cmd()
+        .args(["logs", "--since", "2030-01-01"])
+        .output()
+        .unwrap();
+    assert!(o.status.success() && out(&o).is_empty());
+
+    for bad in [["--status", "9xx"], ["--since", "soon"]] {
+        let o = h.cmd().arg("logs").args(bad).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{bad:?}");
+    }
+}
+
+#[test]
+fn logs_follow_prints_new_records_as_they_arrive_and_survives_rotation() {
+    use std::io::{BufRead, BufReader};
+    let h = Home::new("logs-follow");
+    let path = write_request_log(&h);
+    let mut child = h
+        .cmd()
+        .args(["logs", "--follow", "-n", "1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap());
+    let mut read = || {
+        let mut l = String::new();
+        lines.read_line(&mut l).unwrap();
+        l
+    };
+    assert!(read().contains("404"), "the existing tail comes first");
+    let append = |text: &str| {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    };
+    append("{\"kind\":\"request\",\"ts\":\"2026-10-14T13:00:00.000Z\",\"client\":\"ci\",\"status\":502,\"inbound\":\"chat\"}\n");
+    assert!(
+        read().contains("502 chat client=ci"),
+        "a new record appears"
+    );
+    // Rotation: the file is replaced by a shorter one; following continues from its start.
+    std::fs::write(&path, "{\"kind\":\"request\",\"ts\":\"2026-10-14T14:00:00.000Z\",\"client\":\"ci\",\"status\":429,\"inbound\":\"chat\"}\n").unwrap();
+    assert!(
+        read().contains("429"),
+        "the rotated file is read from the top"
+    );
+    child.kill().unwrap();
+    let _ = child.wait();
+}
