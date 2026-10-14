@@ -1404,3 +1404,150 @@ fn logs_follow_prints_new_records_as_they_arrive_and_survives_rotation() {
     child.kill().unwrap();
     let _ = child.wait();
 }
+
+#[test]
+fn service_dry_run_prints_the_files_and_commands_for_each_manager() {
+    let h = Home::new("service-dry");
+    h.write_config("server:\n  port: 9123\n");
+    let run = |manager: &str, action: &str| {
+        let o = h
+            .cmd()
+            .args(["service", action, "--dry-run", "--manager", manager])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{manager} {action}: {}", errs(&o));
+        out(&o)
+    };
+
+    let launchd = run("launchd", "install");
+    assert!(
+        launchd.contains("Library/LaunchAgents/dev.airmate.gateway.plist"),
+        "{launchd}"
+    );
+    assert!(
+        launchd.contains("<key>SockServiceName</key>\n      <string>9123</string>"),
+        "{launchd}"
+    );
+    assert!(
+        launchd.contains("would run: launchctl bootstrap gui/"),
+        "{launchd}"
+    );
+    assert!(!h.0.join("Library").exists(), "a dry run writes nothing");
+
+    let systemd = run("systemd", "install");
+    assert!(
+        systemd.contains(".config/systemd/user/airmate.socket")
+            && systemd.contains("ListenStream=127.0.0.1:9123"),
+        "{systemd}"
+    );
+    assert!(
+        systemd.contains("would run: systemctl --user enable --now airmate.socket"),
+        "{systemd}"
+    );
+    assert!(!h.0.join(".config/systemd").exists());
+
+    let task = run("task", "install");
+    assert!(
+        task.contains("would run: schtasks /Create /F /SC ONLOGON /TN dev.airmate.gateway /TR"),
+        "{task}"
+    );
+
+    assert!(run("systemd", "uninstall").contains("would remove"));
+    assert!(run("launchd", "restart").contains("kickstart -k"));
+    assert!(run("detached", "install").contains("would start a detached process"));
+}
+
+#[test]
+fn service_install_passes_the_chosen_config_and_profile_to_the_service() {
+    let h = Home::new("service-config");
+    let cfg = h.0.join("custom.yaml");
+    std::fs::write(&cfg, "server:\n  port: 9124\nprofiles:\n  work: {}\n").unwrap();
+    let o = h
+        .cmd()
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "--profile",
+            "work",
+            "service",
+            "install",
+            "--dry-run",
+            "--manager",
+            "systemd",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    let t = out(&o);
+    let canonical = std::fs::canonicalize(&cfg).unwrap();
+    assert!(
+        t.contains(&format!(
+            "serve --config {} --profile work",
+            canonical.display()
+        )),
+        "{t}"
+    );
+}
+
+#[test]
+fn service_refuses_a_broken_configuration_before_touching_anything() {
+    let h = Home::new("service-bad");
+    h.write_config("server:\n  max_concurrent: 0\n");
+    let o = h
+        .cmd()
+        .args(["service", "install", "--dry-run", "--manager", "launchd"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(errs(&o).contains("max_concurrent"), "{}", errs(&o));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_detached_service_starts_reports_status_logs_and_stops() {
+    let h = Home::new("service-detached");
+    let port = free_port();
+    h.write_config(&format!("server:\n  port: {port}\n"));
+    let svc = |args: &[&str]| {
+        let mut c = h.cmd();
+        c.arg("service").args(args).args(["--manager", "detached"]);
+        c.output().unwrap()
+    };
+    let o = svc(&["status"]);
+    assert_eq!(o.status.code(), Some(3), "not running yet: {}", out(&o));
+    assert!(out(&o).contains("running: no"));
+
+    let o = svc(&["start"]);
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(out(&o).contains("started airmate (pid"), "{}", out(&o));
+    wait_until_listening(port);
+    let socket = h.0.join("state/airmate/run/admin.sock");
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let o = svc(&["status"]);
+    assert!(o.status.success(), "{}{}", out(&o), errs(&o));
+    assert!(
+        out(&o).contains("running: yes") && out(&o).contains("detached process, pid"),
+        "{}",
+        out(&o)
+    );
+    assert!(out(&svc(&["start"])).contains("already running"));
+    let o = svc(&["logs"]);
+    assert!(
+        out(&o).contains("listening on http://127.0.0.1:"),
+        "{}",
+        out(&o)
+    );
+
+    let o = svc(&["stop"]);
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(out(&o).contains("stopped airmate"), "{}", out(&o));
+    assert_eq!(svc(&["status"]).status.code(), Some(3));
+    assert!(out(&svc(&["stop"])).contains("not running"));
+    assert!(!h.0.join("state/airmate/airmate.pid").exists());
+}

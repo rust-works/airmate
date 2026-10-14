@@ -47,6 +47,57 @@ pub fn raise_fd_limit(_: u64) -> Option<(u64, u64)> {
     None
 }
 
+/// The real user id, for launchd's `gui/<uid>` domain.
+#[cfg(unix)]
+#[must_use]
+pub fn uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// No user ids where there is no `getuid`.
+#[cfg(not(unix))]
+#[must_use]
+pub fn uid() -> u32 {
+    0
+}
+
+/// Sends `SIGTERM` to a process this user started. Returns whether the signal was delivered.
+#[cfg(unix)]
+#[must_use]
+pub fn terminate(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: kill takes plain integers and only reports an error for a bad pid or permission.
+    pid > 1 && unsafe { libc::kill(pid, libc::SIGTERM) } == 0
+}
+
+/// Whether a process with this pid exists (signal 0 delivers nothing).
+#[cfg(unix)]
+#[must_use]
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: as for `terminate`; signal 0 only checks that the process exists.
+    pid > 1 && unsafe { libc::kill(pid, 0) } == 0
+}
+
+/// Not available without POSIX signals.
+#[cfg(not(unix))]
+#[must_use]
+pub fn terminate(_: u32) -> bool {
+    false
+}
+
+/// Not available without POSIX signals.
+#[cfg(not(unix))]
+#[must_use]
+pub fn process_alive(_: u32) -> bool {
+    false
+}
+
 /// Binds a Unix-domain socket that only the owner can use, in a directory only the owner can
 /// enter. A socket file left by a dead process is replaced; one that still answers belongs to a
 /// running process and is refused.

@@ -8,6 +8,7 @@ pub mod logs_cmd;
 pub mod route_cmd;
 pub mod run_cmd;
 pub mod serve;
+pub mod service_cmd;
 pub mod usage_cmd;
 
 use std::ffi::OsString;
@@ -67,6 +68,12 @@ pub enum Command {
     },
     /// Ask the running gateway to re-read its configuration.
     Reload,
+    /// Run airmate as a per-user service.
+    Service {
+        /// What to do.
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Search and print the request log.
     Logs(LogsArgs),
     /// Show token usage and cost from the usage ledger.
@@ -240,6 +247,56 @@ pub enum StatusFormat {
     Text,
     /// JSON.
     Json,
+}
+
+/// Which service manager to use, when not the platform's default.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ManagerArg {
+    /// A launchd user agent.
+    Launchd,
+    /// systemd user units.
+    Systemd,
+    /// A detached background process.
+    Detached,
+    /// A Windows scheduled task.
+    Task,
+}
+
+/// Options for the service actions.
+#[derive(Debug, Args)]
+pub struct ServiceOpts {
+    /// Print what would be done instead of doing it.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Use this service manager instead of the platform's default.
+    #[arg(long, value_enum)]
+    pub manager: Option<ManagerArg>,
+}
+
+/// `service` actions.
+#[derive(Debug, Subcommand)]
+pub enum ServiceAction {
+    /// Register airmate to start at login and on first connect, and start it.
+    Install(ServiceOpts),
+    /// Stop airmate and remove its registration.
+    Uninstall(ServiceOpts),
+    /// Start the service.
+    Start(ServiceOpts),
+    /// Stop the service.
+    Stop(ServiceOpts),
+    /// Restart the service.
+    Restart(ServiceOpts),
+    /// Show whether the service is installed and running; exits 3 if it is not running.
+    Status(ServiceOpts),
+    /// Show the service's output.
+    Logs {
+        /// Keep watching.
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Use this service manager instead of the platform's default.
+        #[arg(long, value_enum)]
+        manager: Option<ManagerArg>,
+    },
 }
 
 /// How `logs` prints.
@@ -441,6 +498,38 @@ fn dispatch(
             out,
         ),
         Command::Reload => admin_cmd::reload(p, out),
+        Command::Service { action } => {
+            let (what, opts) = match action {
+                ServiceAction::Install(o) => (service_cmd::Do::Install, o),
+                ServiceAction::Uninstall(o) => (service_cmd::Do::Uninstall, o),
+                ServiceAction::Start(o) => (service_cmd::Do::Start, o),
+                ServiceAction::Stop(o) => (service_cmd::Do::Stop, o),
+                ServiceAction::Restart(o) => (service_cmd::Do::Restart, o),
+                ServiceAction::Status(o) => (service_cmd::Do::Status, o),
+                ServiceAction::Logs { follow, manager } => {
+                    return service_cmd::run(
+                        p,
+                        global,
+                        service_cmd::Do::Logs { follow: *follow },
+                        service_cmd::Opts {
+                            dry_run: false,
+                            manager: manager.map(manager_of),
+                        },
+                        out,
+                    )
+                }
+            };
+            service_cmd::run(
+                p,
+                global,
+                what,
+                service_cmd::Opts {
+                    dry_run: opts.dry_run,
+                    manager: opts.manager.map(manager_of),
+                },
+                out,
+            )
+        }
         Command::Logs(a) => {
             let status = a
                 .status
@@ -497,6 +586,15 @@ fn dispatch(
             writeln!(out, "airmate {}", env!("CARGO_PKG_VERSION")).map_err(io)?;
             Ok(())
         }
+    }
+}
+
+fn manager_of(m: ManagerArg) -> crate::service::Manager {
+    match m {
+        ManagerArg::Launchd => crate::service::Manager::Launchd,
+        ManagerArg::Systemd => crate::service::Manager::Systemd,
+        ManagerArg::Detached => crate::service::Manager::Detached,
+        ManagerArg::Task => crate::service::Manager::Task,
     }
 }
 
