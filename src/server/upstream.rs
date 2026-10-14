@@ -103,38 +103,7 @@ pub async fn send(
             USER_AGENT,
             HeaderValue::from_static(concat!("airmate/", env!("CARGO_PKG_VERSION"))),
         );
-        match up.protocol {
-            Protocol::Anthropic => {
-                if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
-                    h.insert("x-api-key", k);
-                }
-                let version = client_headers
-                    .get("anthropic-version")
-                    .cloned()
-                    .unwrap_or(HeaderValue::from_static(ANTHROPIC_VERSION));
-                h.insert("anthropic-version", version);
-                if let Some(beta) = client_headers.get("anthropic-beta") {
-                    h.insert("anthropic-beta", beta.clone());
-                }
-            }
-            Protocol::Gemini => {
-                if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
-                    h.insert("x-goog-api-key", k);
-                }
-            }
-            Protocol::Bedrock if up.aws.is_some() => {
-                sign_bedrock(up, req, h);
-            }
-            _ => {
-                if let Some(k) = up
-                    .api_key
-                    .as_ref()
-                    .and_then(|k| header_value(&format!("Bearer {}", k.expose())))
-                {
-                    h.insert(AUTHORIZATION, k);
-                }
-            }
-        }
+        authenticate(up, "POST", &req.path, &req.body, client_headers, h);
     }
     let request = b
         .body(Full::new(Bytes::from(req.body.clone())))
@@ -154,12 +123,64 @@ pub async fn send(
     }
 }
 
+/// Adds the credentials `up` takes to a request. The upstream key is attached here and nowhere
+/// else, for calls and for health probes alike.
+///
+/// `path` is the path and query as sent; `body` is the payload (needed to sign Bedrock requests).
+pub fn authenticate(
+    up: &UpstreamRt,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    client_headers: &HeaderMap,
+    h: &mut HeaderMap,
+) {
+    match up.protocol {
+        Protocol::Anthropic => {
+            if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
+                h.insert("x-api-key", k);
+            }
+            let version = client_headers
+                .get("anthropic-version")
+                .cloned()
+                .unwrap_or(HeaderValue::from_static(ANTHROPIC_VERSION));
+            h.insert("anthropic-version", version);
+            if let Some(beta) = client_headers.get("anthropic-beta") {
+                h.insert("anthropic-beta", beta.clone());
+            }
+        }
+        Protocol::Gemini => {
+            if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
+                h.insert("x-goog-api-key", k);
+            }
+        }
+        Protocol::Bedrock if up.aws.is_some() => sign_bedrock(up, method, path, body, h),
+        _ => {
+            if let Some(k) = up
+                .api_key
+                .as_ref()
+                .and_then(|k| header_value(&format!("Bearer {}", k.expose())))
+            {
+                h.insert(AUTHORIZATION, k);
+            }
+        }
+    }
+}
+
 /// Adds the Signature Version 4 headers for a Bedrock request. The key material is used here and
 /// nowhere else.
-fn sign_bedrock(up: &UpstreamRt, req: &UpstreamRequest, h: &mut HeaderMap) {
+fn sign_bedrock(
+    up: &UpstreamRt,
+    method: &str,
+    path_and_query: &str,
+    body: &[u8],
+    h: &mut HeaderMap,
+) {
     use airmate_core::outbound::sigv4::{amz_date, sign, Credentials, Request as SignRequest};
     let Some(aws) = &up.aws else { return };
-    let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+    let (path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
     let authority = up
         .base_url
         .split_once("://")
@@ -181,11 +202,11 @@ fn sign_bedrock(up: &UpstreamRt, req: &UpstreamRequest, h: &mut HeaderMap) {
                 .map(crate::secret::Secret::expose),
         },
         &SignRequest {
-            method: "POST",
+            method,
             host: authority,
             path,
             query,
-            body: &req.body,
+            body,
             region: &aws.region,
             service: "bedrock",
             amz_date: &date,

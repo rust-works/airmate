@@ -13,9 +13,11 @@ use airmate_core::ir::Protocol;
 use airmate_core::outbound::anthropic as passthrough;
 use airmate_core::policy::PolicyConfig;
 
-use super::generate::{collect, fail, json_ok, label, resolve};
+use super::generate::{
+    check_model_access, collect, fail, json_ok, label, reserve_client_rate, resolve,
+};
 use super::upstream::{retry_after, send};
-use super::{read_body, GwBody, Route};
+use super::{acquire, read_body, GwBody, Route};
 
 /// `POST /v1/messages/count_tokens`: an estimate, unless the upstream can count.
 pub async fn count_tokens(route: Route, parts: Parts, body: Incoming) -> Response<GwBody> {
@@ -32,7 +34,37 @@ pub async fn count_tokens(route: Route, parts: Parts, body: Incoming) -> Respons
         Ok(e) => e,
         Err(e) => return fail(&route, e),
     };
-    let target = entry.targets[0].clone();
+    // The same client controls apply as to a generation: the model it may use, and its rate.
+    if let Err(e) = check_model_access(&route, &facts.model, &entry.name) {
+        return fail(&route, e);
+    }
+    let _rate = match reserve_client_rate(&route, 0) {
+        Ok(r) => r,
+        Err(e) => return fail(&route, e),
+    };
+    let _permit = match acquire(
+        &route.shared,
+        config
+            .server
+            .queue_timeout_secs
+            .map(std::time::Duration::from_secs),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => return fail(&route, e),
+    };
+    // The first target that is not known to be down; if all are, the estimate stands in.
+    let clock = route.shared.router.clock.now();
+    let usable = entry.targets.iter().find(|t| {
+        let state = route.shared.router.target(&t.label());
+        state.breaker.snapshot(clock).state != "open"
+            && !route
+                .shared
+                .router
+                .upstream_health(&t.upstream.name)
+                .is_unhealthy()
+    });
     let estimate = |n: u64| -> Response<GwBody> {
         json_ok(
             &route,
@@ -41,7 +73,8 @@ pub async fn count_tokens(route: Route, parts: Parts, body: Incoming) -> Respons
         )
     };
 
-    if target.upstream.protocol == Protocol::Anthropic {
+    if let Some(target) = usable.filter(|t| t.upstream.protocol == Protocol::Anthropic) {
+        let target = target.clone();
         let core = target.core_target(config.server.think_tags);
         let request = match passthrough::build_count_tokens(&body, &core) {
             Ok(r) => r,

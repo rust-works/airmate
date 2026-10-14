@@ -11,14 +11,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::header::AUTHORIZATION;
 use hyper::{Method, Request};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use airmate_core::ir::Protocol;
-
 use super::table::UpstreamRt;
+use crate::server::upstream::authenticate;
 use crate::server::Shared;
 
 /// How long a probe may take.
@@ -28,16 +26,9 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub async fn probe(up: &UpstreamRt, path: &str) -> Option<String> {
     let uri = format!("{}{}", up.base_url, path);
     let mut b = Request::builder().method(Method::GET).uri(uri);
-    if let Some(k) = up.api_key.as_ref() {
-        if up.protocol == Protocol::Anthropic {
-            if let Ok(v) = hyper::header::HeaderValue::from_str(k.expose()) {
-                b = b.header("x-api-key", v);
-            }
-        } else if let Ok(v) =
-            hyper::header::HeaderValue::from_str(&format!("Bearer {}", k.expose()))
-        {
-            b = b.header(AUTHORIZATION, v);
-        }
+    if let Some(h) = b.headers_mut() {
+        // The same credentials a real call carries, in the form the upstream's protocol takes.
+        authenticate(up, "GET", path, b"", &hyper::HeaderMap::new(), h);
     }
     let Ok(req) = b.body(Full::new(Bytes::new())) else {
         return Some("invalid health check URL".to_owned());

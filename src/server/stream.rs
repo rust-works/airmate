@@ -161,12 +161,14 @@ impl Pipe {
                 usage: p.summary().usage,
                 finish: p.summary().stop_reason.clone(),
                 completed: p.completed(),
+                error: p.errored().then(|| "the upstream stream failed".to_owned()),
                 ..StreamSummary::default()
             },
             Self::Json(p) => StreamSummary {
                 usage: p.usage(),
                 finish: None,
                 completed: p.completed(),
+                error: p.errored().then(|| "the upstream stream failed".to_owned()),
                 ..StreamSummary::default()
             },
         }
@@ -188,9 +190,13 @@ pub struct StreamBody {
     finished: bool,
     on_done: Option<OnDone>,
     tap: Option<Tap>,
+    scrub: Option<Scrub>,
     stop: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
     _permits: Vec<OwnedSemaphorePermit>,
 }
+
+/// Removes secrets from outgoing bytes; returns `None` when there was nothing to remove.
+pub type Scrub = Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send>;
 
 /// Copies the start of what is sent to the client, for the body log.
 struct Tap {
@@ -235,9 +241,32 @@ impl StreamBody {
             finished: false,
             on_done,
             tap: None,
+            scrub: None,
             stop: None,
             _permits: permits,
         }
+    }
+
+    /// Scrubs what is sent to the client. An upstream that answers 200 and then streams an error
+    /// event can echo a credential in it; this is the last place to remove one. Only chunks that
+    /// mention an error are searched, so ordinary text costs nothing.
+    #[must_use]
+    pub fn with_scrub(mut self, scrub: Scrub) -> Self {
+        let queued = std::mem::take(&mut self.out);
+        for b in queued {
+            self.out.push_back(Self::scrubbed(&scrub, b));
+        }
+        self.scrub = Some(scrub);
+        self
+    }
+
+    fn scrubbed(scrub: &Scrub, b: Bytes) -> Bytes {
+        if b.windows(5).any(|w| w.eq_ignore_ascii_case(b"error")) {
+            if let Some(clean) = scrub(&b) {
+                return Bytes::from(clean);
+            }
+        }
+        b
     }
 
     /// Ends the stream with an error event when `stop` is set (shutdown ran out of patience).
@@ -264,7 +293,11 @@ impl StreamBody {
 
     fn queue(&mut self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
-            self.out.push_back(Bytes::from(bytes));
+            let b = Bytes::from(bytes);
+            self.out.push_back(match &self.scrub {
+                Some(s) => Self::scrubbed(s, b),
+                None => b,
+            });
         }
     }
 

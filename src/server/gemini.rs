@@ -11,7 +11,7 @@ use airmate_core::inbound::gemini::Call;
 use airmate_core::inbound::InboundCtx;
 use airmate_core::policy::PolicyConfig;
 
-use super::generate::{fail, json_ok};
+use super::generate::{check_model_access, fail, json_ok, reserve_client_rate};
 use super::{read_body, GwBody, Route};
 
 /// The header value that marks a token count as a heuristic.
@@ -38,6 +38,17 @@ pub async fn count_tokens(route: Route, parts: Parts, body: Incoming) -> Respons
             _ => body.to_vec(),
         },
         _ => body.to_vec(),
+    };
+    // The same client controls apply as to a generation: the model it may use, and its rate.
+    let entry_name = super::generate::resolve(&route, &call.model)
+        .map(|e| e.name.clone())
+        .unwrap_or_default();
+    if let Err(e) = check_model_access(&route, &call.model, &entry_name) {
+        return fail(&route, e);
+    }
+    let _rate = match reserve_client_rate(&route, 0) {
+        Ok(r) => r,
+        Err(e) => return fail(&route, e),
     };
     let ctx = InboundCtx {
         policy: PolicyConfig {

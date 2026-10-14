@@ -159,6 +159,13 @@ pub struct Tables {
 }
 
 impl Tables {
+    /// `data` with every upstream key and the gateway token replaced by `[redacted]`, or `None`
+    /// when it held none.
+    #[must_use]
+    pub fn redact_bytes(&self, data: &[u8]) -> Option<Vec<u8>> {
+        crate::secret::redact_bytes(data, self.redactions.iter().map(Secret::expose))
+    }
+
     /// `text` with every upstream key and the gateway token replaced by `[redacted]`.
     #[must_use]
     pub fn redact(&self, text: &str) -> String {

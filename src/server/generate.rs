@@ -47,6 +47,83 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Tokens charged to a client's limiter before the call. They are settled to the real usage when
+/// the answer arrives; if the request ends any other way (an error, a refusal, the client going
+/// away) the charge is given back, so a failed request does not eat into the client's allowance.
+pub(super) struct Reservation {
+    limiter: std::sync::Arc<crate::router::limits::Limiter>,
+    estimated: u64,
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl Reservation {
+    /// Settles to the usage the upstream reported. Only the first call counts.
+    pub(super) fn settle(&self, actual: u64) {
+        if !self.settled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.limiter.settle(self.estimated, actual);
+        }
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.settle(0);
+    }
+}
+
+/// Refuses a request for a model the client may not use.
+pub(super) fn check_model_access(
+    route: &Route,
+    model: &str,
+    entry_name: &str,
+) -> Result<(), GatewayError> {
+    let Some(c) = route.tables.clients.get(&route.identity.client) else {
+        return Ok(());
+    };
+    if c.models.is_empty()
+        || c.models
+            .iter()
+            .any(|g| glob_match(g, model) || glob_match(g, entry_name))
+    {
+        return Ok(());
+    }
+    Err(GatewayError::new(
+        ErrorKind::Permission,
+        format!("client `{}` may not use the model `{model}`", c.name),
+    ))
+}
+
+/// Charges the client's rate limits for a request estimated at `est_tokens`, or refuses it with
+/// `429`. The returned reservation settles the charge.
+pub(super) fn reserve_client_rate(
+    route: &Route,
+    est_tokens: u64,
+) -> Result<Option<std::sync::Arc<Reservation>>, GatewayError> {
+    let Some(c) = route.tables.clients.get(&route.identity.client) else {
+        return Ok(None);
+    };
+    let Some(rate) = c.rate else {
+        return Ok(None);
+    };
+    let limiter = route.shared.limits.client(&c.name, rate);
+    match limiter.admit(est_tokens, route.shared.router.clock.now()) {
+        Ok(()) => Ok(Some(std::sync::Arc::new(Reservation {
+            limiter,
+            estimated: est_tokens,
+            settled: std::sync::atomic::AtomicBool::new(false),
+        }))),
+        Err(d) => Err(GatewayError::new(
+            ErrorKind::RateLimit,
+            format!(
+                "client `{}` exceeded its limit of {}",
+                c.name,
+                d.which.describe()
+            ),
+        )
+        .with_retry_after(Some(d.retry_after.as_secs() + 1))),
+    }
+}
+
 /// An error response, with the routing headers when there are any.
 pub(super) fn fail_with(
     route: &Route,
@@ -200,12 +277,13 @@ fn prepare(
             p => {
                 let (request, wants) =
                     json_passthrough::build(src.body, &core, p).map_err(policy)?;
+                let ignored = request.ignored.clone();
                 Ok(Prepared {
                     request,
                     mode: Mode::PassJson {
                         client_wants_usage: wants,
                     },
-                    ignored: Vec::new(),
+                    ignored,
                 })
             }
         };
@@ -237,6 +315,48 @@ fn size_of(f: &Facts, window: Option<u64>) -> SizeInfo {
         context_window: window,
         est_input_tokens: f.est_input_tokens,
         max_tokens: f.max_tokens,
+    }
+}
+
+/// Reads a whole reply, giving up if the upstream goes quiet for `idle` between frames. The
+/// first-byte timeout covers only the headers, so without this a body that stalls would hold a
+/// concurrency permit for ever.
+async fn collect_idle(
+    mut body: Incoming,
+    max: usize,
+    idle: Duration,
+) -> Result<Bytes, GatewayError> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match tokio::time::timeout(idle, body.frame()).await {
+            Err(_) => {
+                return Err(GatewayError::new(
+                    ErrorKind::Timeout,
+                    format!(
+                        "the upstream stopped sending its reply for {} seconds",
+                        idle.as_secs()
+                    ),
+                ))
+            }
+            Ok(None) => return Ok(Bytes::from(buf)),
+            Ok(Some(Err(e))) => {
+                return Err(GatewayError::new(
+                    ErrorKind::BadGateway,
+                    format!("the upstream connection broke: {e}"),
+                ))
+            }
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    if buf.len() + data.len() > max {
+                        return Err(GatewayError::new(
+                            ErrorKind::BadGateway,
+                            "the upstream reply was too large",
+                        ));
+                    }
+                    buf.extend_from_slice(&data);
+                }
+            }
+        }
     }
 }
 
@@ -422,7 +542,8 @@ async fn attempt(
             }
         };
     }
-    match collect(body, 256 << 20).await {
+    let idle = Duration::from_secs(target.upstream.timeouts.idle_secs);
+    match collect_idle(body, 256 << 20, idle).await {
         Ok(bytes) => {
             let ttfb = started.elapsed();
             route
@@ -431,11 +552,8 @@ async fn attempt(
             Ok((Delivered::Complete { bytes }, ttfb))
         }
         Err(e) => {
-            route.rec.attempt(target, 502, None);
-            Err(from_gateway(GatewayError::new(
-                ErrorKind::BadGateway,
-                e.message,
-            )))
+            route.rec.attempt(target, e.status(), None);
+            Err(from_gateway(e))
         }
     }
 }
@@ -583,45 +701,17 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
     route.rec.rule(planned.rule.as_deref());
     let mut skipped = planned.skipped.clone();
 
-    // Per-client controls: which models it may use, and how fast.
-    if let Some(c) = client_cfg {
-        if fallback.is_none()
-            && !c.models.is_empty()
-            && !c
-                .models
-                .iter()
-                .any(|g| glob_match(g, &facts.model) || glob_match(g, &planned.entry_name))
-        {
-            return fail(
-                &route,
-                GatewayError::new(
-                    ErrorKind::Permission,
-                    format!(
-                        "client `{}` may not use the model `{}`",
-                        c.name, facts.model
-                    ),
-                ),
-            );
+    // Per-client controls: which models it may use, and how fast. A budget fallback was chosen by
+    // the operator, so the client's model list does not apply to it.
+    if fallback.is_none() {
+        if let Err(e) = check_model_access(&route, &facts.model, &planned.entry_name) {
+            return fail(&route, e);
         }
     }
-    let client_limiter =
-        client_cfg.and_then(|c| c.rate.map(|rate| route.shared.limits.client(&c.name, rate)));
-    if let Some(l) = &client_limiter {
-        if let Err(d) = l.admit(facts.est_input_tokens, route.shared.router.clock.now()) {
-            return fail(
-                &route,
-                GatewayError::new(
-                    ErrorKind::RateLimit,
-                    format!(
-                        "client `{}` exceeded its limit of {}",
-                        route.identity.client,
-                        d.which.describe()
-                    ),
-                )
-                .with_retry_after(Some(d.retry_after.as_secs() + 1)),
-            );
-        }
-    }
+    let client_limiter = match reserve_client_rate(&route, facts.est_input_tokens) {
+        Ok(r) => r,
+        Err(e) => return fail(&route, e),
+    };
 
     let queue = config.server.queue_timeout_secs.map(Duration::from_secs);
     let permit = match acquire(&route.shared, queue).await {
@@ -813,9 +903,10 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                     // A pause longer than the router will wait: mark the target and fail over.
                     if let Some(secs) = wait_for {
                         if secs > failover.retry_after_ceiling_secs {
-                            planned_target
-                                .state
-                                .cool_until(now + Duration::from_secs(secs));
+                            // An upstream controls `secs`: clamp it so the sum cannot overflow.
+                            planned_target.state.cool_until(
+                                now.saturating_add(Duration::from_secs(secs.min(86_400))),
+                            );
                             continue 'targets;
                         }
                     }
@@ -834,19 +925,16 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                             break 'targets;
                         }
                         tokio::time::sleep(wait).await;
-                        // The breaker may have opened while we waited.
-                        if !planned_target
-                            .state
-                            .breaker
-                            .try_acquire(state.clock.now())
-                            .allowed()
-                        {
+                        // The breaker may have opened while we waited, or have handed us its probe.
+                        let readmit = planned_target.state.breaker.try_acquire(state.clock.now());
+                        if !readmit.allowed() {
                             skipped.push(Skip {
                                 target: target.label(),
                                 reason: SkipReason::CircuitOpen,
                             });
                             continue 'targets;
                         }
+                        guard.armed = matches!(readmit, crate::router::breaker::Admit::Probe);
                         continue;
                     }
                     continue 'targets;
@@ -942,19 +1030,15 @@ async fn finish(
     headers: Vec<(&'static str, String)>,
     permit: OwnedSemaphorePermit,
     slot: Option<OwnedSemaphorePermit>,
-    client_limiter: Option<std::sync::Arc<crate::router::limits::Limiter>>,
+    client_limiter: Option<std::sync::Arc<Reservation>>,
 ) -> Response<GwBody> {
     let config = &route.tables.config;
     let target = &planned.target;
-    let estimated = source.facts.est_input_tokens;
     let meter = Meter::new(route, planned, &source.facts.model);
     let settle = |usage: &airmate_core::ir::Usage| {
         meter.settle(usage);
         if let Some(l) = &client_limiter {
-            l.settle(
-                estimated,
-                usage.input_tokens + usage.cache_read_input_tokens,
-            );
+            l.settle(usage.input_tokens + usage.cache_read_input_tokens);
         }
     };
     let client_model = source.facts.model.clone();
@@ -1072,7 +1156,6 @@ async fn finish(
                     }
                     if let Some(l) = &limiter {
                         l.settle(
-                            estimated,
                             summary.usage.input_tokens + summary.usage.cache_read_input_tokens,
                         );
                     }
@@ -1098,6 +1181,8 @@ async fn finish(
                 stream = stream.with_tap(cap);
             }
             stream = stream.with_stop(route.shared.hard_stop.subscribe());
+            let tables = route.tables.clone();
+            stream = stream.with_scrub(Box::new(move |b| tables.redact_bytes(b)));
             let mut b = Response::builder()
                 .status(200)
                 .header("content-type", "text/event-stream")

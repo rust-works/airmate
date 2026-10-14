@@ -60,6 +60,36 @@ pub fn redact<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> Str
     out
 }
 
+/// Like [`redact`], over bytes: every occurrence of each secret in `data` is replaced by
+/// `[redacted]`. Returns `None` when nothing was found, so the common case copies nothing.
+#[must_use]
+pub fn redact_bytes<'a>(
+    data: &[u8],
+    secrets: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<u8>> {
+    let mut out: Option<Vec<u8>> = None;
+    for s in secrets.into_iter().filter(|s| s.len() >= 8) {
+        let needle = s.as_bytes();
+        let hay = out.as_deref().unwrap_or(data);
+        if !hay.windows(needle.len()).any(|w| w == needle) {
+            continue;
+        }
+        let mut next = Vec::with_capacity(hay.len());
+        let mut i = 0;
+        while i < hay.len() {
+            if hay[i..].starts_with(needle) {
+                next.extend_from_slice(b"[redacted]");
+                i += needle.len();
+            } else {
+                next.push(hay[i]);
+                i += 1;
+            }
+        }
+        out = Some(next);
+    }
+    out
+}
+
 /// Why a secret could not be resolved. Messages never contain the secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretError(pub String);
