@@ -21,6 +21,22 @@ pub struct InboundCtx<'a> {
     pub count_tokens: bool,
 }
 
+/// Refuses the request when a row the policy table classes as translated has no arm in the
+/// parser. That is a bug in airmate, but a client must never be able to turn it into a panic, so
+/// the request is refused and the message says to report it.
+macro_rules! unhandled {
+    ($($arg:tt)*) => {
+        return Err($crate::inbound::invalid(
+            "request",
+            format!(
+                "internal error: {}; this is a bug in airmate, please report it",
+                format!($($arg)*)
+            ),
+        ))
+    };
+}
+pub(crate) use unhandled;
+
 pub(crate) fn invalid(field: impl Into<String>, message: impl Into<String>) -> PolicyError {
     PolicyError {
         field: field.into(),
@@ -76,4 +92,27 @@ pub(crate) fn want_u32(v: &Json, path: &str) -> Result<u32, PolicyError> {
 pub(crate) fn want_i64(v: &Json, path: &str) -> Result<i64, PolicyError> {
     v.as_i64()
         .ok_or_else(|| invalid(path, format!("`{path}` must be an integer")))
+}
+
+#[cfg(test)]
+mod tests {
+
+    fn handler(x: u8) -> Result<u8, crate::policy::PolicyError> {
+        match x {
+            0 => Ok(0),
+            other => unhandled!("table says `{other}` is translated but the parser has no case"),
+        }
+    }
+
+    #[test]
+    fn an_unhandled_row_is_an_error_naming_the_bug_not_a_panic() {
+        assert_eq!(handler(0), Ok(0));
+        let e = handler(7).unwrap_err();
+        assert_eq!(e.field, "request");
+        assert!(
+            e.message.contains("`7` is translated") && e.message.contains("please report it"),
+            "{}",
+            e.message
+        );
+    }
 }

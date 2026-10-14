@@ -6,8 +6,8 @@
 use serde_json::{Map, Value as Json};
 
 use super::{
-    invalid, parse_object, want_array, want_bool, want_f64, want_i64, want_object, want_str,
-    want_u32, InboundCtx,
+    invalid, parse_object, unhandled, want_array, want_bool, want_f64, want_i64, want_object,
+    want_str, want_u32, InboundCtx,
 };
 use crate::ir::{
     Effort, ImageSource, IrRequest, Part, Protocol, Reasoning, ReasoningDisplay, ReasoningMode,
@@ -160,7 +160,7 @@ impl Parser {
                     }
                 }
                 other => {
-                    unreachable!("table says `{other}` is translated but the parser has no case")
+                    unhandled!("table says `{other}` is translated but the parser has no case")
                 }
             }
         }
@@ -196,7 +196,7 @@ impl Parser {
             match k.as_str() {
                 "type" => ty = Some(want_str(v, "thinking.type")?),
                 "budget_tokens" => budget = Some(want_u32(v, "thinking.budget_tokens")?),
-                other => unreachable!("table says thinking field `{other}` is translated"),
+                other => unhandled!("table says thinking field `{other}` is translated"),
             }
         }
         let mode = match ty {
@@ -268,7 +268,7 @@ impl Parser {
                         }
                     }
                     "function" => function = Some(want_object(v, &format!("{path}.function"))?),
-                    other => unreachable!("table says tool field `{other}` is translated"),
+                    other => unhandled!("table says tool field `{other}` is translated"),
                 }
             }
             let f = function
@@ -294,7 +294,7 @@ impl Parser {
                         schema = Some(v.clone());
                     }
                     "strict" => strict = v.as_bool(),
-                    other => unreachable!("table says function field `{other}` is translated"),
+                    other => unhandled!("table says function field `{other}` is translated"),
                 }
             }
             out.push(ToolDef {
@@ -348,7 +348,7 @@ impl Parser {
                             name = f.get("name").and_then(Json::as_str).map(str::to_owned);
                         }
                         other => {
-                            unreachable!("table says tool_choice field `{other}` is translated")
+                            unhandled!("table says tool_choice field `{other}` is translated")
                         }
                     }
                 }
@@ -390,7 +390,7 @@ impl Parser {
                     "tool_calls" => tool_calls = Some(v),
                     "tool_call_id" => tool_call_id = Some(want_str(v, &kp)?.to_owned()),
                     "refusal" => refusal = v.as_str().map(str::to_owned),
-                    other => unreachable!("table says message key `{other}` is translated"),
+                    other => unhandled!("table says message key `{other}` is translated"),
                 }
             }
             let role = role.ok_or_else(|| invalid(format!("{path}.role"), "`role` is required"))?;
@@ -574,7 +574,7 @@ impl Parser {
                             )?;
                             out.push(Part::Image(image_source(url)));
                         }
-                        other => unreachable!("table says content part `{other}` is translated"),
+                        other => unhandled!("table says content part `{other}` is translated"),
                     }
                 }
                 Ok(out)

@@ -9,8 +9,8 @@ use serde_json::{Map, Value as Json};
 
 use super::chat::image_source;
 use super::{
-    invalid, parse_object, want_array, want_bool, want_f64, want_object, want_str, want_u32,
-    InboundCtx,
+    invalid, parse_object, unhandled, want_array, want_bool, want_f64, want_object, want_str,
+    want_u32, InboundCtx,
 };
 use crate::ir::{
     Effort, IrRequest, Part, Protocol, Reasoning, ReasoningDisplay, ReasoningMode, ResponseFormat,
@@ -110,7 +110,7 @@ impl Parser<'_> {
                     ir.cache_hints = true;
                 }
                 other => {
-                    unreachable!("table says `{other}` is translated but the parser has no case")
+                    unhandled!("table says `{other}` is translated but the parser has no case")
                 }
             }
         }
@@ -149,7 +149,7 @@ impl Parser<'_> {
                     None => return Err(invalid("reasoning.effort", "`effort` must be a string")),
                 },
                 "summary" | "generate_summary" => wants_summary |= !v.is_null(),
-                other => unreachable!("table says reasoning key `{other}` is translated"),
+                other => unhandled!("table says reasoning key `{other}` is translated"),
             }
         }
         let mode = if off {
@@ -238,7 +238,7 @@ impl Parser<'_> {
                         }
                     }
                     "strict" => strict = v.as_bool(),
-                    other => unreachable!("table says tool field `{other}` is translated"),
+                    other => unhandled!("table says tool field `{other}` is translated"),
                 }
             }
             out.push(ToolDef {
@@ -283,7 +283,7 @@ impl Parser<'_> {
                         }
                         "name" => name = Some(want_str(v, "tool_choice.name")?.to_owned()),
                         other => {
-                            unreachable!("table says tool_choice field `{other}` is translated")
+                            unhandled!("table says tool_choice field `{other}` is translated")
                         }
                     }
                 }
@@ -470,7 +470,7 @@ impl Parser<'_> {
                     ),
                 }
             }
-            other => unreachable!("table says input item `{other}` is translated"),
+            other => unhandled!("table says input item `{other}` is translated"),
         }
         Ok(())
     }
@@ -515,7 +515,7 @@ impl Parser<'_> {
                         }
                         "refusal" => out.push(Part::Text(field("refusal")?.to_owned())),
                         "input_image" => out.push(Part::Image(image_source(field("image_url")?))),
-                        other => unreachable!("table says content part `{other}` is translated"),
+                        other => unhandled!("table says content part `{other}` is translated"),
                     }
                 }
                 Ok(out)

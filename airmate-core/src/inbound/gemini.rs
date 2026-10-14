@@ -11,8 +11,8 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value as Json};
 
 use super::{
-    invalid, parse_object, want_array, want_bool, want_f64, want_i64, want_object, want_str,
-    want_u32, InboundCtx,
+    invalid, parse_object, unhandled, want_array, want_bool, want_f64, want_i64, want_object,
+    want_str, want_u32, InboundCtx,
 };
 use crate::ir::{
     DocumentSource, Effort, ImageSource, IrRequest, Part, Protocol, Reasoning, ReasoningDisplay,
@@ -112,7 +112,7 @@ impl Parser {
                     self.generation_config(want_object(value, "generationConfig")?, ir)?
                 }
                 other => {
-                    unreachable!("table says `{other}` is translated but the parser has no case")
+                    unhandled!("table says `{other}` is translated but the parser has no case")
                 }
             }
         }
@@ -183,7 +183,7 @@ impl Parser {
                         };
                     }
                     "parts" => parts = want_array(v, &format!("{path}.parts"))?,
-                    other => unreachable!("table says message key `{other}` is translated"),
+                    other => unhandled!("table says message key `{other}` is translated"),
                 }
             }
             if role == "model" {
@@ -247,7 +247,8 @@ impl Parser {
                     "text" => "text",
                     "inlineData" => "inlineData",
                     "functionCall" => "functionCall",
-                    other => unreachable!("table says part `{other}` is translated"),
+                    "functionResponse" => "functionResponse",
+                    other => unhandled!("table says part `{other}` is translated"),
                 },
                 v,
             ));
@@ -279,6 +280,13 @@ impl Parser {
                     .map_or_else(|| format!("call_{}", self.calls), str::to_owned);
                 let input = o.get("args").cloned().unwrap_or_else(|| json!({}));
                 out.push(Part::ToolCall { id, name, input });
+            }
+            "functionResponse" => {
+                // Tool results are taken from user turns before a part is read as content.
+                return Err(invalid(
+                    format!("{path}.functionResponse"),
+                    "a function response belongs in a `user` turn, answering the call before it",
+                ));
             }
             _ => {}
         }
@@ -390,7 +398,7 @@ impl Parser {
                     continue;
                 }
                 if k != "functionDeclarations" {
-                    unreachable!("table says tool field `{k}` is translated");
+                    unhandled!("table says tool field `{k}` is translated");
                 }
                 for (j, d) in want_array(v, &format!("{path}.functionDeclarations"))?
                     .iter()
@@ -409,7 +417,15 @@ impl Parser {
         let mut description = None;
         let mut schema = None;
         for (k, v) in normalised(obj) {
-            if self.policy.check(Group::ToolField, &k)? == Decision::Skip {
+            let checked = self
+                .policy
+                .check(Group::BlockField, &format!("functionDeclaration.{k}"))
+                .map_err(|mut e| {
+                    e.field = format!("{path}.{k}");
+                    e.message = e.message.replace("functionDeclaration.", "");
+                    e
+                })?;
+            if checked == Decision::Skip {
                 continue;
             }
             match k.as_str() {
@@ -423,7 +439,7 @@ impl Parser {
                         schema = Some(v.clone());
                     }
                 }
-                other => unreachable!("table says declaration field `{other}` is translated"),
+                other => unhandled!("table says declaration field `{other}` is translated"),
             }
         }
         Ok(ToolDef {
@@ -462,7 +478,7 @@ impl Parser {
                         .map(|n| want_str(n, "allowedFunctionNames[]").map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                     }
-                    other => unreachable!("table says tool choice field `{other}` is translated"),
+                    other => unhandled!("table says tool choice field `{other}` is translated"),
                 }
             }
             ir.tool_choice.kind = match mode.as_str() {
@@ -547,7 +563,7 @@ impl Parser {
                 }
                 "thinkingConfig" => ir.reasoning = self.thinking(want_object(v, &name)?)?,
                 other => {
-                    unreachable!("table says `{other}` is translated but the parser has no case")
+                    unhandled!("table says `{other}` is translated but the parser has no case")
                 }
             }
         }
@@ -592,7 +608,7 @@ impl Parser {
                         }
                     });
                 }
-                other => unreachable!("table says thinking field `{other}` is translated"),
+                other => unhandled!("table says thinking field `{other}` is translated"),
             }
         }
         let mode = match budget {
@@ -995,6 +1011,43 @@ mod tests {
         );
         assert_eq!(file.field, "fileData");
         assert_eq!(err(&json!({"contents": []})).field, "contents");
+    }
+
+    #[test]
+    fn a_declaration_field_at_the_tool_level_is_unknown_not_a_panic() {
+        // Found by fuzzing: `name` is a function declaration field, not a field of a tool.
+        let e = err(&json!({"contents": [{"parts": [{"text": "x"}]}], "tools": [{"name": "n"}]}));
+        assert_eq!(e.field, "name");
+        assert!(e.message.contains("not known to airmate"), "{}", e.message);
+        let e = err(
+            &json!({"contents": [{"parts": [{"text": "x"}]}], "tools": [{"functionDeclarations": [{"name": "n", "mystery": 1}]}]}),
+        );
+        assert_eq!(e.field, "tools[0].functionDeclarations[0].mystery");
+        assert!(
+            e.message.contains("`mystery` is not known"),
+            "{}",
+            e.message
+        );
+        let ok = parse(&json!({"contents": [{"parts": [{"text": "x"}]}], "tools": [{"functionDeclarations": [{"name": "n", "behavior": "NON_BLOCKING", "response": {}}]}]})).unwrap();
+        assert_eq!(ok.value.tools.len(), 1);
+        assert!(ok
+            .ignored
+            .iter()
+            .any(|i| i.name == "functionDeclaration.behavior"));
+    }
+
+    #[test]
+    fn a_function_response_in_a_model_turn_is_refused_not_a_panic() {
+        // Found by fuzzing.
+        let e = err(
+            &json!({"contents": [{"role": "model", "parts": [{"functionResponse": {"name": "n", "response": {}}}]}]}),
+        );
+        assert_eq!(e.field, "contents[0].parts[0].functionResponse");
+        assert!(
+            e.message.contains("belongs in a `user` turn"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
