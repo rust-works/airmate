@@ -19,6 +19,11 @@ const CASES: &[(&str, Protocol)] = &[
     ("chat_midstream_error", Protocol::Chat),
     ("chat_trailing_usage", Protocol::Chat),
     ("responses_reasoning_tool", Protocol::Responses),
+    ("gemini_text", Protocol::Gemini),
+    ("gemini_thinking_tool", Protocol::Gemini),
+    ("gemini_truncated", Protocol::Gemini),
+    ("gemini_midstream_error", Protocol::Gemini),
+    ("gemini_blocked", Protocol::Gemini),
 ];
 
 fn dir() -> PathBuf {
@@ -88,8 +93,13 @@ fn byte_at_a_time_delivery_changes_nothing() {
 
 #[test]
 fn truncated_and_failed_streams_never_end_in_message_stop() {
-    for name in ["chat_truncated", "chat_midstream_error"] {
-        let out = String::from_utf8(convert(&[&upstream(name)], Protocol::Chat)).unwrap();
+    for (name, protocol) in [
+        ("chat_truncated", Protocol::Chat),
+        ("chat_midstream_error", Protocol::Chat),
+        ("gemini_truncated", Protocol::Gemini),
+        ("gemini_midstream_error", Protocol::Gemini),
+    ] {
+        let out = String::from_utf8(convert(&[&upstream(name)], protocol)).unwrap();
         assert!(out.contains("event: error"), "{name}");
         assert!(!out.contains("message_stop"), "{name}");
     }

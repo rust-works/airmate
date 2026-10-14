@@ -6,6 +6,8 @@ pub mod anthropic_parse;
 pub mod chat;
 pub mod chat_parse;
 pub mod embeddings;
+pub mod gemini;
+pub mod gemini_parse;
 pub mod json_passthrough;
 pub mod responses;
 pub mod responses_parse;
@@ -180,6 +182,8 @@ impl UpstreamError {
             "too many tokens",
             "prompt is too long",
             "reduce the length",
+            "exceeds the maximum number of tokens",
+            "input token count",
         ]
         .iter()
         .any(|needle| m.contains(needle))

@@ -32,6 +32,7 @@ use airmate::server::{bind_with_deps, Tables};
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    pub query: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -204,6 +205,7 @@ async fn answer(
     let rec = Recorded {
         method: parts.method.to_string(),
         path: parts.uri.path().to_owned(),
+        query: parts.uri.query().unwrap_or_default().to_owned(),
         headers: parts
             .headers
             .iter()

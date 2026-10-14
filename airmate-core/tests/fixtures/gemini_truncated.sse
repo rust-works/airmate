@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"This answer stops mid"}]},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"resp_fixture","usageMetadata":{"promptTokenCount":5,"totalTokenCount":9,"candidatesTokenCount":4}}
+

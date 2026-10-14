@@ -117,6 +117,11 @@ pub async fn send(
                     h.insert("anthropic-beta", beta.clone());
                 }
             }
+            Protocol::Gemini => {
+                if let Some(k) = up.api_key.as_ref().and_then(|k| header_value(k.expose())) {
+                    h.insert("x-goog-api-key", k);
+                }
+            }
             _ => {
                 if let Some(k) = up
                     .api_key

@@ -51,3 +51,17 @@ entries:
     documents: true
     thinking: true
     effort: true
+  - match: "gemini-3*"
+    context_window: 1048576
+    max_output_tokens: 65536
+    vision: true
+    documents: true
+    thinking: true
+    effort: true
+  - match: "gemini-2.5*"
+    context_window: 1048576
+    max_output_tokens: 65536
+    vision: true
+    documents: true
+    thinking: true
+    effort: true

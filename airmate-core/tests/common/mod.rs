@@ -5,6 +5,7 @@
 use airmate_core::flavor::Flavor;
 use airmate_core::ir::{Origin, Protocol, ReasoningDisplay};
 use airmate_core::outbound::chat_parse::ChatStream;
+use airmate_core::outbound::gemini_parse::GeminiStream;
 use airmate_core::outbound::responses_parse::ResponsesStream;
 use airmate_core::outbound::ParseCtx;
 use airmate_core::signature::SigningKey;
@@ -29,6 +30,7 @@ pub fn parser(protocol: Protocol) -> Box<dyn StreamParse> {
     };
     match protocol {
         Protocol::Responses => Box::new(ResponsesStream::new(ctx)),
+        Protocol::Gemini => Box::new(GeminiStream::new(ctx)),
         _ => Box::new(ChatStream::new(ctx)),
     }
 }
