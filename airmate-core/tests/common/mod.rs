@@ -44,6 +44,8 @@ pub fn render_ctx(protocol: Protocol) -> RenderCtx {
         display: ReasoningDisplay::Summarized,
         est_input_tokens: 100,
         buffer_cap: DEFAULT_BUFFER_CAP,
+        created: 1_700_000_000,
+        include_usage: true,
     }
 }
 

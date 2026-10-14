@@ -246,6 +246,8 @@ pub async fn messages(route: Route, parts: Parts, body: Incoming) -> Response<Gw
                     est_input_tokens: prepared.facts.est_input_tokens,
                     buffer_cap: usize::try_from(config.server.buffer_cap_bytes)
                         .unwrap_or(usize::MAX),
+                    created: unix_now(),
+                    include_usage: false,
                 };
                 render_message(&c, &rctx)
             }
@@ -331,6 +333,8 @@ async fn stream_response(
             display: ir.reasoning.display,
             est_input_tokens: prepared.facts.est_input_tokens,
             buffer_cap: usize::try_from(config.server.buffer_cap_bytes).unwrap_or(usize::MAX),
+            created: unix_now(),
+            include_usage: false,
         });
         Pipe::translate(parser, Box::new(render))
     } else {
@@ -482,4 +486,12 @@ pub fn model(route: &Route, _parts: &Parts, id: &str) -> Response<GwBody> {
             ),
         )
     }
+}
+
+/// Seconds since the Unix epoch.
+#[must_use]
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }

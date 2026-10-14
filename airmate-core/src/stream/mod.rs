@@ -4,6 +4,8 @@
 //! the client's protocol. Both are state machines: `push(bytes)` and `finish()`.
 
 pub mod anthropic_render;
+pub mod chat_render;
+pub mod responses_render;
 pub mod sequencer;
 pub mod think;
 

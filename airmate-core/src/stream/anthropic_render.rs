@@ -45,6 +45,10 @@ pub struct RenderCtx {
     pub est_input_tokens: u64,
     /// The cap on the interleaving buffer.
     pub buffer_cap: usize,
+    /// Seconds since the Unix epoch, for OpenAI-shaped `created` fields (the core has no clock).
+    pub created: u64,
+    /// Whether a streamed OpenAI reply ends with a usage chunk.
+    pub include_usage: bool,
 }
 
 fn usage_json(u: &Usage) -> Json {
@@ -431,6 +435,8 @@ mod tests {
             display: ReasoningDisplay::Summarized,
             est_input_tokens: 42,
             buffer_cap: 1 << 20,
+            created: 1_700_000_000,
+            include_usage: true,
         }
     }
 

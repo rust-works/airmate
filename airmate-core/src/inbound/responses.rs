@@ -50,6 +50,7 @@ impl Parser<'_> {
         let mut have_model = false;
         let mut system: Vec<SystemPart> = Vec::new();
         let mut input: Option<&Json> = None;
+        let mut wants_encrypted = false;
 
         for (key, value) in obj {
             if self.policy.check(Group::Request, key)? == Decision::Skip {
@@ -96,7 +97,9 @@ impl Parser<'_> {
                 "include" => {
                     for (i, v) in want_array(value, "include")?.iter().enumerate() {
                         let name = want_str(v, &format!("include[{i}]"))?;
-                        if name != "reasoning.encrypted_content" {
+                        if name == "reasoning.encrypted_content" {
+                            wants_encrypted = true;
+                        } else {
                             self.policy
                                 .ignore(&format!("include.{name}"), "no upstream equivalent");
                         }
@@ -113,6 +116,10 @@ impl Parser<'_> {
         }
         if !have_model {
             return Err(invalid("model", "`model` is required"));
+        }
+        // A client that asks for the encrypted reasoning means to replay it, so it gets reasoning.
+        if wants_encrypted && ir.reasoning.mode == ReasoningMode::Unspecified {
+            ir.reasoning.mode = ReasoningMode::Adaptive;
         }
         let input = input.ok_or_else(|| invalid("input", "`input` is required"))?;
         self.input(input, &mut ir, &mut system)?;
