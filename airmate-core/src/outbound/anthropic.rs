@@ -20,14 +20,14 @@ pub const PATH: &str = "/v1/messages";
 /// The token-counting path.
 pub const COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 
-fn bad(field: &str, message: &str) -> PolicyError {
+pub(crate) fn bad(field: &str, message: &str) -> PolicyError {
     PolicyError {
         field: field.to_owned(),
         message: message.to_owned(),
     }
 }
 
-fn parse(body: &[u8]) -> Result<Map<String, Json>, PolicyError> {
+pub(crate) fn parse(body: &[u8]) -> Result<Map<String, Json>, PolicyError> {
     match serde_json::from_slice::<Json>(body) {
         Ok(Json::Object(m)) => Ok(m),
         Ok(_) => Err(bad("body", "the request body must be a JSON object")),
@@ -38,7 +38,7 @@ fn parse(body: &[u8]) -> Result<Map<String, Json>, PolicyError> {
     }
 }
 
-fn estimate_value(v: &Json) -> u64 {
+pub(crate) fn estimate_value(v: &Json) -> u64 {
     match v {
         Json::String(s) => s.chars().count().div_ceil(4) as u64,
         Json::Array(a) => a.iter().map(estimate_value).sum(),
@@ -52,7 +52,7 @@ fn estimate_value(v: &Json) -> u64 {
     }
 }
 
-fn has_image(v: &Json) -> bool {
+pub(crate) fn has_image(v: &Json) -> bool {
     match v {
         Json::Array(a) => a.iter().any(has_image),
         Json::Object(o) => {

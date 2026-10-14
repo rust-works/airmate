@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapters;
 pub mod cache;
 pub mod error;
 pub mod estimate;
