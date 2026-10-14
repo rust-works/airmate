@@ -7,5 +7,6 @@
 
 pub mod estimate;
 pub mod ir;
+pub mod policy;
 pub mod signature;
 pub mod sse;
