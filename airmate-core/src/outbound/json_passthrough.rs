@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value as Json};
 
 use super::{Target, UpstreamRequest};
 use crate::ir::{Protocol, Usage};
-use crate::policy::PolicyError;
+use crate::policy::{Policy, PolicyError};
 use crate::sse::{format_event, SseEvent, SseParser};
 use crate::stream::StreamError;
 use crate::toolname::ToolNames;
@@ -31,6 +31,32 @@ pub fn build(
 ) -> Result<(UpstreamRequest, bool), PolicyError> {
     let mut o = obj(body)?;
     o.insert("model".to_owned(), Json::String(target.model.clone()));
+    // The target's output cap applies to a forwarded request as it does to a translated one: a
+    // limit above it is lowered, and where the client set none the cap is sent.
+    let mut ignored = Policy::collector();
+    if let Some(cap) = target.max_output_tokens_cap {
+        let keys: &[&str] = match protocol {
+            Protocol::Responses => &["max_output_tokens"],
+            _ => &["max_completion_tokens", "max_tokens"],
+        };
+        let present: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| o.contains_key(*k))
+            .collect();
+        if present.is_empty() {
+            o.insert(keys[keys.len() - 1].to_owned(), Json::from(cap));
+        }
+        for k in present {
+            if o.get(k)
+                .and_then(Json::as_u64)
+                .is_some_and(|v| v > u64::from(cap))
+            {
+                o.insert(k.to_owned(), Json::from(cap));
+                ignored.ignore(k, "lowered to the target's output limit");
+            }
+        }
+    }
     let stream = o.get("stream").and_then(Json::as_bool).unwrap_or(false);
     let mut client_wants_usage = true;
     if protocol == Protocol::Chat && stream {
@@ -53,7 +79,7 @@ pub fn build(
             body: serde_json::to_vec(&Json::Object(o)).expect("a JSON value serialises"),
             stream,
             tool_names: ToolNames::new(),
-            ignored: Vec::new(),
+            ignored: ignored.into_ignored(),
         },
         client_wants_usage,
     ))
@@ -129,6 +155,13 @@ impl JsonPassthroughStream {
     #[must_use]
     pub fn completed(&self) -> bool {
         self.terminal && !self.errored
+    }
+
+    /// Whether the stream failed: the upstream sent an error, or it broke, stalled or ended early
+    /// and an error was sent in its place.
+    #[must_use]
+    pub fn errored(&self) -> bool {
+        self.errored
     }
 
     fn handle(&mut self, events: Vec<SseEvent>) -> Vec<u8> {
@@ -238,6 +271,57 @@ impl JsonPassthroughStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forwarded_request_obeys_the_targets_output_cap() {
+        let mut t = Target::new("up", Protocol::Chat, crate::flavor::Flavor::Generic, "m");
+        t.max_output_tokens_cap = Some(100);
+        let sent = |body: Json, p: Protocol| -> Json {
+            let (u, _) = build(body.to_string().as_bytes(), &t, p).unwrap();
+            serde_json::from_slice(&u.body).unwrap()
+        };
+        // Above the cap: lowered, and reported.
+        let (u, _) = build(br#"{"model":"x","max_tokens":5000}"#, &t, Protocol::Chat).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Json>(&u.body).unwrap()["max_tokens"],
+            100
+        );
+        assert!(u.ignored.iter().any(|i| i.name == "max_tokens"));
+        // Under it: untouched. Not set: the cap is sent, as a translated request does.
+        assert_eq!(
+            sent(json!({"model":"x","max_tokens":50}), Protocol::Chat)["max_tokens"],
+            50
+        );
+        assert_eq!(
+            sent(json!({"model":"x"}), Protocol::Chat)["max_tokens"],
+            100
+        );
+        assert_eq!(
+            sent(
+                json!({"model":"x","max_completion_tokens":900}),
+                Protocol::Chat
+            )["max_completion_tokens"],
+            100
+        );
+        assert_eq!(
+            sent(
+                json!({"model":"x","max_output_tokens":900}),
+                Protocol::Responses
+            )["max_output_tokens"],
+            100
+        );
+        assert_eq!(
+            sent(json!({"model":"x"}), Protocol::Responses)["max_output_tokens"],
+            100
+        );
+        // No cap, no change.
+        let free = Target::new("up", Protocol::Chat, crate::flavor::Flavor::Generic, "m");
+        let (u, _) = build(br#"{"model":"x","max_tokens":5000}"#, &free, Protocol::Chat).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Json>(&u.body).unwrap()["max_tokens"],
+            5000
+        );
+    }
     use crate::flavor::Flavor;
 
     fn target() -> Target {

@@ -151,6 +151,17 @@ fn build_at(body: &[u8], target: &Target, path: &str) -> Result<UpstreamRequest,
             }
         }
     }
+    // The target's output cap applies to a forwarded request as it does to a translated one.
+    if path == PATH {
+        if let Some(cap) = target.max_output_tokens_cap {
+            if let Some(Json::Number(n)) = obj.get("max_tokens") {
+                if n.as_u64().is_some_and(|v| v > u64::from(cap)) {
+                    obj.insert("max_tokens".to_owned(), Json::from(cap));
+                    ignored.ignore("max_tokens", "lowered to the target's output limit");
+                }
+            }
+        }
+    }
     let stream = obj.get("stream").and_then(Json::as_bool).unwrap_or(false);
     Ok(UpstreamRequest {
         path: path.to_owned(),
@@ -243,6 +254,13 @@ impl PassthroughStream {
         self.saw_stop
     }
 
+    /// Whether the stream failed: the upstream sent an `error` event, or it broke, stalled or ended
+    /// early and an `error` event was sent in its place.
+    #[must_use]
+    pub fn errored(&self) -> bool {
+        self.errored
+    }
+
     fn handle(&mut self, events: Vec<crate::sse::SseEvent>) -> Vec<u8> {
         let mut out = Vec::new();
         for ev in events {
@@ -329,6 +347,38 @@ mod tests {
     use super::*;
     use crate::flavor::Flavor;
     use serde_json::json;
+
+    #[test]
+    fn a_forwarded_anthropic_request_obeys_the_targets_output_cap() {
+        let mut t = Target::new("up", Protocol::Anthropic, Flavor::Generic, "m");
+        t.max_output_tokens_cap = Some(4096);
+        let sent = |max: u64, t: &Target| -> (Json, Vec<String>) {
+            let body = json!({"model": "claude-x", "max_tokens": max, "messages": []});
+            let u = build_passthrough(body.to_string().as_bytes(), t).unwrap();
+            (
+                serde_json::from_slice(&u.body).unwrap(),
+                u.ignored.into_iter().map(|i| i.name).collect(),
+            )
+        };
+        let (b, ignored) = sent(64_000, &t);
+        assert_eq!(b["max_tokens"], 4096);
+        assert_eq!(ignored, ["max_tokens"]);
+        assert_eq!(
+            sent(1_000, &t).0["max_tokens"],
+            1_000,
+            "under the cap is left alone"
+        );
+        t.max_output_tokens_cap = None;
+        assert_eq!(sent(64_000, &t).0["max_tokens"], 64_000);
+        // Counting tokens generates nothing, so the cap does not touch it.
+        t.max_output_tokens_cap = Some(10);
+        let counted =
+            build_count_tokens(br#"{"model":"x","messages":[],"max_tokens":999}"#, &t).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Json>(&counted.body).unwrap()["max_tokens"],
+            999
+        );
+    }
 
     fn fw() -> Target {
         Target::new(
