@@ -110,7 +110,7 @@ impl Parser<'_> {
         if !have_model {
             return Err(invalid("model", "`model` is required"));
         }
-        if !have_max {
+        if !have_max && !self.ctx.count_tokens {
             return Err(invalid("max_tokens", "`max_tokens` is required"));
         }
         if !have_messages {
@@ -892,6 +892,19 @@ mod tests {
     }
 
     #[test]
+    fn count_tokens_requests_need_no_max_tokens() {
+        let mut b = base();
+        b.as_object_mut().unwrap().remove("max_tokens");
+        let ctx = InboundCtx {
+            count_tokens: true,
+            ..InboundCtx::default()
+        };
+        let p = parse_request(b.to_string().as_bytes(), &ctx).unwrap();
+        assert_eq!(p.value.max_output_tokens, 0);
+        assert!(parse(b).is_err(), "an ordinary request still needs it");
+    }
+
+    #[test]
     fn rejects_zero_max_tokens() {
         let err = parse(with(json!({"max_tokens": 0}))).unwrap_err();
         assert_eq!(err.field, "max_tokens");
@@ -954,6 +967,7 @@ mod tests {
                 unknown_fields: UnknownFields::Warn,
             },
             signing_key: None,
+            ..InboundCtx::default()
         };
         let p = parse_request(with(json!({"shiny_new": 1})).to_string().as_bytes(), &ctx).unwrap();
         assert_eq!(p.ignored[0].name, "shiny_new");
@@ -1396,6 +1410,7 @@ mod tests {
         let ctx = InboundCtx {
             policy: PolicyConfig::default(),
             signing_key: Some(&key),
+            ..InboundCtx::default()
         };
         let p = parse_request(body.to_string().as_bytes(), &ctx).unwrap();
         match &p.value.turns[1] {
@@ -1433,6 +1448,7 @@ mod tests {
         let ctx = InboundCtx {
             policy: PolicyConfig::default(),
             signing_key: Some(&key),
+            ..InboundCtx::default()
         };
         let p = parse_request(body.to_string().as_bytes(), &ctx).unwrap();
         match &p.value.turns[1] {
@@ -1461,6 +1477,7 @@ mod tests {
             InboundCtx {
                 policy: PolicyConfig::default(),
                 signing_key: Some(&other),
+                ..InboundCtx::default()
             },
             InboundCtx::default(),
         ] {
@@ -1476,6 +1493,7 @@ mod tests {
         let ctx = InboundCtx {
             policy: PolicyConfig::default(),
             signing_key: Some(&key),
+            ..InboundCtx::default()
         };
         let p = parse_request(foreign.to_string().as_bytes(), &ctx).unwrap();
         assert!(p.ignored.iter().any(|i| i.name == "thinking_unverified"));

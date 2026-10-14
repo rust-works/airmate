@@ -13,6 +13,7 @@ use super::glob::{glob_match, is_glob};
 use crate::config::schema::{Config, Price, StrategyName, Timeouts, UpstreamConfig};
 use crate::config::validate::{normalize_url, ConfigError};
 use crate::secret::{Secret, SecretResolver};
+use crate::server::upstream::{build_client, HttpClient};
 
 /// An upstream, ready to call.
 #[derive(Debug)]
@@ -37,6 +38,8 @@ pub struct UpstreamRt {
     pub key_setting: String,
     /// The per-upstream concurrency limit.
     pub max_concurrent: Option<u32>,
+    /// The pooled HTTP client for this upstream.
+    pub client: HttpClient,
 }
 
 impl UpstreamRt {
@@ -309,6 +312,7 @@ fn upstream_rt(
             think_tags: u.think_tags.unwrap_or(config.server.think_tags),
             key_setting,
             max_concurrent: u.max_concurrent,
+            client: build_client(Duration::from_secs(u.timeouts.connect_secs)),
         },
         warning,
     ))

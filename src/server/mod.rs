@@ -1,6 +1,8 @@
 //! The HTTP server: listener, request guard and routing.
 
+pub mod anthropic;
 pub mod guard;
+pub mod upstream;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -16,13 +18,17 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 
 use airmate_core::error::GatewayError;
 use airmate_core::ir::Protocol;
+use airmate_core::signature::SigningKey;
 
 use crate::auth::{Authenticator, Identity};
 use crate::config::schema::Config;
+use crate::config::validate::ConfigError;
+use crate::router::ModelTable;
+use crate::secret::{Secret, SecretResolver};
 use guard::{check_host, check_origin, extract_token, GuardConfig};
 
 /// The response body type: either a buffered body or a stream.
@@ -81,12 +87,44 @@ pub struct Tables {
     pub config: Arc<Config>,
     /// Authenticates presented tokens.
     pub auth: Box<dyn Authenticator>,
+    /// The upstreams and model entries.
+    pub models: ModelTable,
+    /// Signs and verifies thinking blocks; derived from the gateway token.
+    pub signing_key: SigningKey,
+}
+
+impl Tables {
+    /// Builds the tables from a configuration, resolving every secret.
+    ///
+    /// # Errors
+    ///
+    /// Every secret that cannot be resolved, and a malformed client key.
+    pub fn build(
+        config: Arc<Config>,
+        resolver: &dyn SecretResolver,
+        gateway_token: &Secret,
+    ) -> Result<(Self, Vec<String>), Vec<ConfigError>> {
+        let (models, warnings) = ModelTable::build(&config, resolver)?;
+        let auth = crate::auth::TokenAuthenticator::new(gateway_token, &config.clients)
+            .map_err(|e| vec![ConfigError::new("clients", e.to_string())])?;
+        Ok((
+            Self {
+                config,
+                auth: Box::new(auth),
+                models,
+                signing_key: SigningKey::from_token(gateway_token.expose()),
+            },
+            warnings,
+        ))
+    }
 }
 
 /// State shared by every connection.
 pub struct Shared {
     /// The listener facts the guard needs; restart-only.
     pub guard: GuardConfig,
+    /// The global concurrency limit.
+    pub permits: Arc<Semaphore>,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -165,6 +203,7 @@ pub async fn bind(config: &Config, tables: Tables) -> Result<BoundGateway, BindE
             bound_port: Some(local.port()),
             allowed_hosts: config.server.allowed_hosts.clone(),
         },
+        permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
         tables: RwLock::new(Arc::new(tables)),
     });
     Ok(BoundGateway {
@@ -244,30 +283,124 @@ pub fn run_guard(
 }
 
 async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody> {
-    let (parts, _body) = req.into_parts();
+    let (parts, body) = req.into_parts();
     let rid = request_id(&parts.headers);
     let inbound = protocol_for_path(parts.uri.path());
     let tables = shared.tables();
-    let _identity = match run_guard(&shared, &tables, &parts) {
+    let identity = match run_guard(&shared, &tables, &parts) {
         Ok(id) => id,
         Err(e) => return error_response(inbound, &e.with_request_id(rid)),
     };
-    let e = GatewayError::not_served(parts.uri.path()).with_request_id(rid);
-    error_response(inbound, &e)
+    let route = Route {
+        shared,
+        tables,
+        identity,
+        rid: rid.clone(),
+    };
+    let path = parts.uri.path().to_owned();
+    match (parts.method.as_str(), path.as_str()) {
+        ("POST", "/v1/messages") => anthropic::messages(route, parts, body).await,
+        ("POST", "/v1/messages/count_tokens") => anthropic::count_tokens(route, parts, body).await,
+        ("GET", "/v1/models") => anthropic::models(&route, &parts),
+        ("GET", p) if p.starts_with("/v1/models/") => {
+            anthropic::model(&route, &parts, &p["/v1/models/".len()..])
+        }
+        _ => error_response(
+            inbound,
+            &GatewayError::not_served(&path).with_request_id(rid),
+        ),
+    }
+}
+
+/// What a handler knows about the request it is serving.
+pub struct Route {
+    /// The shared state.
+    pub shared: Arc<Shared>,
+    /// The tables the request started with.
+    pub tables: Arc<Tables>,
+    /// Who is calling.
+    pub identity: Identity,
+    /// The request id.
+    pub rid: String,
+}
+
+/// Reads a request body, refusing more than `max` bytes.
+///
+/// # Errors
+///
+/// `413 request_too_large` over the cap, `400` if the body cannot be read.
+pub async fn read_body(
+    body: Incoming,
+    headers: &hyper::HeaderMap,
+    max: u64,
+) -> Result<Bytes, GatewayError> {
+    let declared = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let too_large = || {
+        GatewayError::new(
+            airmate_core::error::ErrorKind::RequestTooLarge,
+            format!("the request body is larger than {max} bytes"),
+        )
+    };
+    if declared.is_some_and(|n| n > max) {
+        return Err(too_large());
+    }
+    match http_body_util::Limited::new(body, usize::try_from(max).unwrap_or(usize::MAX))
+        .collect()
+        .await
+    {
+        Ok(c) => Ok(c.to_bytes()),
+        Err(e)
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            Err(too_large())
+        }
+        Err(_) => Err(GatewayError::new(
+            airmate_core::error::ErrorKind::InvalidRequest,
+            "the request body could not be read",
+        )),
+    }
+}
+
+/// Takes a concurrency slot, queueing for `queue_timeout` if configured.
+///
+/// # Errors
+///
+/// `429 rate_limit_error` when none is free in time.
+pub async fn acquire(
+    shared: &Shared,
+    queue_timeout: Option<std::time::Duration>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, GatewayError> {
+    let permits = shared.permits.clone();
+    match permits.clone().try_acquire_owned() {
+        Ok(p) => Ok(p),
+        Err(_) => match queue_timeout {
+            Some(t) => match tokio::time::timeout(t, permits.acquire_owned()).await {
+                Ok(Ok(p)) => Ok(p),
+                _ => Err(GatewayError::at_capacity(1)),
+            },
+            None => Err(GatewayError::at_capacity(1)),
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::TokenAuthenticator;
-    use crate::secret::Secret;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     pub(crate) fn tables(token: &str) -> Tables {
-        Tables {
-            config: Arc::new(Config::default()),
-            auth: Box::new(TokenAuthenticator::new(&Secret::new(token), &[]).unwrap()),
-        }
+        let env: crate::config::paths::EnvFn<'_> = &|_| None;
+        Tables::build(
+            Arc::new(Config::default()),
+            &crate::secret::SystemResolver::new(env),
+            &Secret::new(token),
+        )
+        .unwrap()
+        .0
     }
 
     pub(crate) async fn start(

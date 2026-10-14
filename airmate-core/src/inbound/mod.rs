@@ -14,6 +14,8 @@ pub struct InboundCtx<'a> {
     pub policy: PolicyConfig,
     /// The key that verifies thinking signatures; without one every thinking block is unverified.
     pub signing_key: Option<&'a SigningKey>,
+    /// A `count_tokens` request: `max_tokens` is optional because nothing is generated.
+    pub count_tokens: bool,
 }
 
 pub(crate) fn invalid(field: impl Into<String>, message: impl Into<String>) -> PolicyError {

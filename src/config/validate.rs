@@ -170,6 +170,12 @@ fn check_upstream(u: &UpstreamConfig, out: &mut Vec<ConfigError>) {
             ));
         }
     }
+    if u.proxy.is_some() {
+        out.push(ConfigError::new(
+            format!("{p}.proxy"),
+            "upstream proxies are not supported yet",
+        ));
+    }
     if matches!(u.protocol, ProtocolName::Gemini | ProtocolName::Bedrock)
         && u.flavor != super::schema::FlavorName::Generic
     {
