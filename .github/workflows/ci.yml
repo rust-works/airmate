@@ -118,7 +118,7 @@ jobs:
         fetch-depth: 0          # full history so `git merge-base` can resolve the PR's fork point
     # cargo-llvm-cov run, merge-base baseline, `patchcov diff` sticky PR comment,
     # baseline publish on main, and the line gate, all packaged in one action.
-    - uses: action-works/patchcov-action@v1.0
+    - uses: action-works/patchcov-action@v2.0
       with:
         fail-under-lines: 30
 
