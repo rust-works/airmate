@@ -793,3 +793,87 @@ fn models_check_fails_when_the_catalog_is_blind() {
         .status
         .success());
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sighup_reloads_the_configuration_and_a_bad_one_is_rejected() {
+    let chat = |text: &'static str| {
+        move |_: &support::Recorded| {
+            Reply::json(
+                200,
+                serde_json::json!({"id": "c", "model": "m", "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+            )
+        }
+    };
+    let a = Mock::start(chat("from a")).await;
+    let b = Mock::start(chat("from b")).await;
+    let h = Home::new("sighup");
+    let port = free_port();
+    let write = |url: &str| {
+        h.write_config(&format!("server:\n  port: {port}\nupstreams:\n  - {{ name: up, url: \"{url}\" }}\nmodels:\n  - {{ match: \"*\", targets: [ {{ upstream: up, model: m }} ] }}\n"))
+    };
+    write(&a.url());
+    let mut child = h.cmd().arg("serve").stderr(Stdio::piped()).spawn().unwrap();
+    wait_until_listening(port);
+    let token = std::fs::read_to_string(h.token_file()).unwrap();
+    let body =
+        r#"{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+    let ask = || http(port, "POST", "/v1/messages", Some(&token), body);
+    let (status, reply) = ask();
+    assert_eq!(status, 200, "{reply}");
+    assert!(reply.contains("from a"));
+
+    let hup = |child: &std::process::Child| {
+        assert!(Command::new("kill")
+            .args(["-HUP", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success())
+    };
+    write(&b.url());
+    hup(&child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, reply) = ask();
+        if reply.contains("from b") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reload did not take effect: {reply}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // A broken file is rejected and the last good configuration keeps serving.
+    h.write_config("server:\n  max_concurrent: 0\n");
+    hup(&child);
+    std::thread::sleep(Duration::from_millis(500));
+    let (status, reply) = ask();
+    assert_eq!(status, 200, "{reply}");
+    assert!(reply.contains("from b"));
+
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "serve did not stop");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("reloaded the configuration"), "{stderr}");
+    assert!(
+        stderr.contains("reload rejected, the previous configuration stays in force"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("max_concurrent"), "{stderr}");
+}

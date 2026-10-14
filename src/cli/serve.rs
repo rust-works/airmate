@@ -9,6 +9,7 @@ use super::common::{gateway_token, load, CliError, Global, Process};
 use crate::config::overrides::Overrides;
 use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
 use crate::secret::SystemResolver;
+use crate::server::reload::reload;
 use crate::server::{bind_with, Tables};
 
 /// Runs the gateway until interrupted.
@@ -22,6 +23,7 @@ pub fn serve(
     flags: Overrides,
     err: &mut dyn Write,
 ) -> Result<(), CliError> {
+    let flags_for_reload = flags.clone();
     let loaded = load(p, global, flags)?;
     let token = gateway_token(p, &loaded)?;
     let config = Arc::new(loaded.resolved.config.clone());
@@ -54,8 +56,16 @@ pub fn serve(
             if config.models.len() == 1 { "y" } else { "ies" },
         );
         let (tx, rx) = watch::channel(false);
+        let shared = gw.shared();
         let serving = tokio::spawn(gw.serve(rx));
-        wait_for_signal().await;
+        let reload_ctx = ReloadCtx {
+            p,
+            global,
+            flags: &flags_for_reload,
+        };
+        while let Signal::Reload = wait_for_signal().await {
+            reload_now(&shared, &reload_ctx, err);
+        }
         let _ = writeln!(err, "airmate: shutting down");
         let _ = tx.send(true);
         let _ = serving.await;
@@ -63,25 +73,71 @@ pub fn serve(
     })
 }
 
+struct ReloadCtx<'a> {
+    p: &'a Process,
+    global: &'a Global,
+    flags: &'a Overrides,
+}
+
+/// Re-reads the configuration and swaps it in; a bad one is reported and the old one stays.
+fn reload_now(shared: &crate::server::Shared, ctx: &ReloadCtx<'_>, err: &mut dyn Write) {
+    let result = (|| -> Result<_, String> {
+        let loaded = load(ctx.p, ctx.global, ctx.flags.clone()).map_err(|e| e.to_string())?;
+        let token = gateway_token(ctx.p, &loaded).map_err(|e| e.to_string())?;
+        let resolver = SystemResolver::new(&*ctx.p.env);
+        reload(shared, loaded.resolved.config, &resolver, &token)
+            .map_err(|errs| crate::config::ConfigErrors(errs).to_string())
+    })();
+    match result {
+        Ok(report) => {
+            let _ = writeln!(err, "airmate: reloaded the configuration");
+            for w in report.warnings {
+                let _ = writeln!(err, "airmate: warning: {w}");
+            }
+            for s in report.restart_required {
+                let _ = writeln!(
+                    err,
+                    "airmate: warning: {s} changed but only takes effect after a restart"
+                );
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "airmate: reload rejected, the previous configuration stays in force:\n{e}"
+            );
+        }
+    }
+}
+
+/// What woke the server up.
+enum Signal {
+    Reload,
+    Stop,
+}
+
 #[cfg(unix)]
-async fn wait_for_signal() {
+async fn wait_for_signal() -> Signal {
     use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut term), Ok(mut int)) = (
+    let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
         signal(SignalKind::terminate()),
         signal(SignalKind::interrupt()),
+        signal(SignalKind::hangup()),
     ) else {
         std::future::pending::<()>().await;
-        return;
+        return Signal::Stop;
     };
     tokio::select! {
-        _ = term.recv() => {},
-        _ = int.recv() => {},
+        _ = term.recv() => Signal::Stop,
+        _ = int.recv() => Signal::Stop,
+        _ = hup.recv() => Signal::Reload,
     }
 }
 
 #[cfg(not(unix))]
-async fn wait_for_signal() {
+async fn wait_for_signal() -> Signal {
     let _ = tokio::signal::ctrl_c().await;
+    Signal::Stop
 }
 
 /// Opens the request log if the configuration asks for one; a log that cannot be opened is

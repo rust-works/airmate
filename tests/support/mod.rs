@@ -435,6 +435,21 @@ impl TestGateway {
         }
     }
 
+    /// Reloads the configuration from `yaml`, as `SIGHUP` would.
+    pub fn reload(
+        &self,
+        yaml: &str,
+    ) -> Result<airmate::server::reload::ReloadReport, Vec<airmate::config::ConfigError>> {
+        let config = load_str(yaml, None).map_err(|e| e.0)?;
+        let env: EnvFn<'_> = &|n| (n == "UP_KEY").then(|| "k".to_owned());
+        airmate::server::reload::reload(
+            &self.shared,
+            config,
+            &SystemResolver::new(env),
+            &Secret::new(self.token.clone()),
+        )
+    }
+
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
     }

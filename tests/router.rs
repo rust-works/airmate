@@ -780,3 +780,73 @@ async fn an_upstream_that_fails_its_health_check_is_skipped_until_it_recovers() 
         "the upstream is probed repeatedly"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reloading_under_load_drops_no_request() {
+    let a = Mock::start(|_| Reply::json(200, chat_ok("from a"))).await;
+    let b = Mock::start(|_| Reply::json(200, chat_ok("from b"))).await;
+    // Room for every request at once: a 429 at the concurrency limit is not a dropped request.
+    let top = "server:\n  max_concurrent: 1000\n  affinity: false\n";
+    let cfg_a = config(&[("a", &a.url())], "", top);
+    let cfg_b = config(&[("b", &b.url())], "", top);
+    let g = Arc::new(gw(&cfg_a).await);
+    let mut clients = Vec::new();
+    for _ in 0..200 {
+        let g = g.clone();
+        clients.push(tokio::spawn(async move {
+            g.post("/v1/messages", &request()).await
+        }));
+    }
+    for i in 0..60 {
+        let next = if i % 2 == 0 { &cfg_b } else { &cfg_a };
+        g.reload(next).expect("a valid configuration reloads");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for c in clients {
+        let r = c.await.unwrap();
+        assert_eq!(r.status, 200, "{}", r.text());
+        seen.insert(r.header("x-airmate-upstream").unwrap().to_owned());
+    }
+    assert!(seen.iter().all(|u| u == "a" || u == "b"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn a_rejected_reload_leaves_the_old_configuration_in_force() {
+    let a = Mock::start(|_| Reply::json(200, chat_ok("from a"))).await;
+    let g = gw(&config(&[("a", &a.url())], "", "")).await;
+    let before = g.shared.tables();
+    let errs = g.reload("server:\n  max_concurrent: 0\n").unwrap_err();
+    assert!(errs.iter().any(|e| e.path.contains("max_concurrent")));
+    let errs = g
+        .reload(
+            "upstreams:\n  - name: x\n    url: http://x\n    api_key: { env: NOT_SET_ANYWHERE }\n",
+        )
+        .unwrap_err();
+    assert!(errs[0].message.contains("NOT_SET_ANYWHERE"));
+    assert!(Arc::ptr_eq(&before, &g.shared.tables()));
+    assert_eq!(g.post("/v1/messages", &request()).await.status, 200);
+}
+
+#[tokio::test]
+async fn a_reload_reports_what_needs_a_restart() {
+    let a = Mock::start(|_| Reply::json(200, chat_ok("x"))).await;
+    let g = gw(&config(&[("a", &a.url())], "", "")).await;
+    let report = g
+        .reload(&config(
+            &[("a", &a.url())],
+            "",
+            "server:\n  port: 12345\n  think_tags: false\n",
+        ))
+        .unwrap();
+    assert_eq!(report.restart_required, ["server.port"]);
+    assert!(
+        !g.shared.tables().config.server.think_tags,
+        "everything else took effect"
+    );
+    assert_eq!(
+        g.post("/v1/messages", &request()).await.status,
+        200,
+        "the listener is unchanged"
+    );
+}

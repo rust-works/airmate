@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod generate;
 pub mod guard;
 pub mod record;
+pub mod reload;
 pub mod stream;
 pub mod upstream;
 
