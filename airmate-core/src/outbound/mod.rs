@@ -2,6 +2,8 @@
 
 pub mod chat;
 pub mod chat_parse;
+pub mod responses;
+pub mod responses_parse;
 
 use crate::flavor::Flavor;
 use crate::ir::{Effort, Origin, Protocol};

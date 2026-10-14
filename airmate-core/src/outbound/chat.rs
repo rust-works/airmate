@@ -15,7 +15,7 @@ use crate::toolname::ToolNames;
 /// The Chat Completions path.
 pub const PATH: &str = "/v1/chat/completions";
 
-fn reject(field: &str, message: impl Into<String>) -> PolicyError {
+pub(super) fn reject(field: &str, message: impl Into<String>) -> PolicyError {
     PolicyError {
         field: field.to_owned(),
         message: message.into(),
@@ -177,7 +177,7 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
 }
 
 /// The effort in force: a per-turn effort on a mid-conversation system message wins.
-fn effective_effort(req: &IrRequest) -> Option<Effort> {
+pub(super) fn effective_effort(req: &IrRequest) -> Option<Effort> {
     req.system
         .iter()
         .rev()
@@ -236,7 +236,7 @@ fn data_uri(media_type: &str, data: &str) -> String {
     format!("data:{media_type};base64,{data}")
 }
 
-fn image_url(src: &ImageSource) -> String {
+pub(super) fn image_url(src: &ImageSource) -> String {
     match src {
         ImageSource::Base64 { media_type, data } => data_uri(media_type, data),
         ImageSource::Url(u) => u.clone(),
@@ -263,7 +263,7 @@ fn user_content(parts: &[Part]) -> Json {
     Json::Array(out)
 }
 
-fn text_of(parts: &[Part]) -> String {
+pub(super) fn text_of(parts: &[Part]) -> String {
     parts
         .iter()
         .filter_map(|p| match p {
