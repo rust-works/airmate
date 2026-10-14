@@ -2,6 +2,7 @@
 
 pub mod admin_cmd;
 pub mod common;
+pub mod doctor_cmd;
 pub mod env_cmd;
 pub mod keys_cmd;
 pub mod logs_cmd;
@@ -59,6 +60,18 @@ pub enum Command {
         /// Exit 3 if any target has no catalog entry.
         #[arg(long)]
         check: bool,
+    },
+    /// Send small test requests to each upstream and report what works; exits 3 if any fails.
+    Doctor {
+        /// Test only this upstream.
+        #[arg(long)]
+        upstream: Option<String>,
+        /// Test this upstream model rather than the first one a model entry names.
+        #[arg(long)]
+        model: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Show the state of the running gateway; exits 3 if it is down or unhealthy.
     Status {
@@ -504,6 +517,11 @@ fn dispatch(
             KeysAction::Revoke { name } => keys_cmd::revoke(p, global, name, out),
             KeysAction::Rotate { name, save } => keys_cmd::rotate(p, global, name, *save, out),
         },
+        Command::Doctor {
+            upstream,
+            model,
+            json,
+        } => doctor_cmd::doctor(p, global, upstream.as_deref(), model.as_deref(), *json, out),
         Command::Status { format } => admin_cmd::status(
             p,
             match format {

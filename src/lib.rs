@@ -9,6 +9,7 @@ pub mod auth;
 pub mod bodylog;
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod keychain;
 pub mod metrics;
 pub mod obs;
