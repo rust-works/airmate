@@ -339,6 +339,12 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
         }
         ReasoningMode::Unspecified => {}
     }
+    if req.response_format == ResponseFormat::JsonObject {
+        ignored.ignore(
+            "response_format",
+            "the Anthropic Messages API has no json_object mode",
+        );
+    }
     let mut output_config = Map::new();
     if let Some(e) = effort {
         output_config.insert("effort".into(), json!(e.as_str()));

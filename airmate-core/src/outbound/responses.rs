@@ -160,6 +160,9 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
         body.insert("reasoning".into(), Json::Object(r));
     }
 
+    if req.response_format == ResponseFormat::JsonObject {
+        body.insert("text".into(), json!({"format": {"type": "json_object"}}));
+    }
     if let ResponseFormat::JsonSchema { schema, strict } = &req.response_format {
         body.insert(
             "text".into(),

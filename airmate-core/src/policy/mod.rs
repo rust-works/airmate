@@ -14,6 +14,7 @@
 //! the gateway.
 
 pub mod anthropic;
+pub mod chat;
 
 use std::fmt;
 
@@ -208,6 +209,7 @@ pub struct Parsed<T> {
 pub fn table(inbound: Protocol) -> &'static [Entry] {
     match inbound {
         Protocol::Anthropic => anthropic::TABLE,
+        Protocol::Chat => chat::TABLE,
         _ => &[],
     }
 }

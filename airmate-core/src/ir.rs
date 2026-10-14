@@ -241,6 +241,8 @@ pub enum ResponseFormat {
     /// Free text.
     #[default]
     Text,
+    /// Valid JSON of any shape (`json_object`).
+    JsonObject,
     /// Output constrained by a JSON Schema.
     JsonSchema {
         /// The schema.
@@ -356,6 +358,8 @@ pub enum Turn {
 pub struct Extensions {
     /// Which protocol the request arrived on.
     pub inbound: Protocol,
+    /// Whether a streamed reply should end with a usage chunk (`stream_options.include_usage`).
+    pub stream_usage: bool,
 }
 
 /// The protocol-neutral request.
@@ -406,7 +410,10 @@ impl IrRequest {
             response_format: ResponseFormat::Text,
             stream: false,
             cache_hints: false,
-            extensions: Extensions { inbound },
+            extensions: Extensions {
+                inbound,
+                stream_usage: false,
+            },
         }
     }
 

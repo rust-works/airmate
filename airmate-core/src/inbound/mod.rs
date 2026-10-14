@@ -1,6 +1,7 @@
 //! Inbound adapters: parse a client's request into the IR, classing every field.
 
 pub mod anthropic;
+pub mod chat;
 
 use serde_json::{Map, Value as Json};
 
@@ -68,4 +69,9 @@ pub(crate) fn want_u32(v: &Json, path: &str) -> Result<u32, PolicyError> {
     v.as_u64()
         .and_then(|n| u32::try_from(n).ok())
         .ok_or_else(|| invalid(path, format!("`{path}` must be a non-negative integer")))
+}
+
+pub(crate) fn want_i64(v: &Json, path: &str) -> Result<i64, PolicyError> {
+    v.as_i64()
+        .ok_or_else(|| invalid(path, format!("`{path}` must be an integer")))
 }
