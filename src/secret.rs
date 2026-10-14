@@ -226,7 +226,17 @@ impl SecretResolver for SystemResolver<'_> {
                 run_helper(argv, self.command_timeout)?,
                 "the credential helper output",
             )?,
-            SecretRef::Keychain(service) => crate::keychain::lookup(service)?,
+            SecretRef::Keychain(service) => {
+                let platform = crate::config::paths::Platform::current();
+                let argv = crate::keychain::argv(service, platform)?;
+                let out = run_helper(&argv, self.command_timeout).map_err(|e| {
+                    err(format!(
+                        "the keychain entry `{service}` could not be read ({e}); {}",
+                        crate::keychain::hint(service, platform)
+                    ))
+                })?;
+                nonempty(out, &format!("the keychain entry `{service}`"))?
+            }
             SecretRef::Value(v) => {
                 warning = Some(
                     "a literal secret is set in the configuration file; use env, file or command instead"
@@ -420,11 +430,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn the_keychain_reports_when_it_is_unavailable() {
+    fn a_missing_keychain_entry_says_how_to_store_it() {
         let e = env(&[]);
         let result = SystemResolver::new(&e)
+            .with_command_timeout(Duration::from_secs(5))
             .resolve(&SecretRef::Keychain("airmate-test-no-such-service".into()));
-        assert!(result.is_err());
+        let message = result.expect_err("no such entry").to_string();
+        assert!(
+            message.contains("airmate-test-no-such-service"),
+            "{message}"
+        );
+        assert!(
+            message.contains("security add-generic-password")
+                || message.contains("secret-tool store")
+                || message.contains("not supported on Windows"),
+            "{message}"
+        );
     }
 }
