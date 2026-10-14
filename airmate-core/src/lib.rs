@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod error;
 pub mod estimate;
 pub mod facts;
 pub mod flavor;
