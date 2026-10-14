@@ -47,7 +47,11 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     # Keep in step with `rust-version` in Cargo.toml and `msrv` in clippy.toml.
-    - uses: dtolnay/rust-toolchain@1.88.0
+    # Pinned via `toolchain:` on @master, not an @<version> tag, so Dependabot
+    # can't mistake the action's tag for the Rust version and bump the MSRV.
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
     - uses: Swatinem/rust-cache@v2
     - name: Build and test on the minimum supported Rust version
       run: cargo test --verbose
