@@ -9,9 +9,10 @@ use super::common::{gateway_token, load, CliError, Global, Process};
 use crate::bodylog::{BodySink, JsonlBodies, NullBodies};
 use crate::config::overrides::Overrides;
 use crate::obs::{JsonlLog, NullSink, RecordSink, Rotation};
+use crate::router::clock::{OsRandom, SystemClock};
 use crate::secret::SystemResolver;
 use crate::server::reload::{reload, ReloadReport};
-use crate::server::{bind_with, Tables};
+use crate::server::{bind_listener, bind_with, Listener, Tables};
 use crate::usage::{NullUsage, UsageRecord, UsageSink};
 
 /// Runs the gateway until interrupted.
@@ -45,16 +46,35 @@ pub fn serve(
         // otherwise take the process down with the default action.
         let mut signals = Signals::new();
         let (usage_sink, history) = usage_ledger(&config, &loaded.dirs.usage_ledger(), err);
-        let gw = bind_with(&config, tables, sink.clone())
-            .await
-            .map_err(|e| CliError::runtime(e.to_string()))?
-            .with_usage(usage_sink, &history)
+        // Plenty of descriptors for concurrent streams; the default soft limit is often 256.
+        let _ = crate::sys::raise_fd_limit(4096);
+        let gw = match crate::sys::inherited_listener() {
+            Some(socket) => {
+                let _ = writeln!(
+                    err,
+                    "airmate: using the socket the service manager passed in; `server.bind` and `server.port` are not used"
+                );
+                let listener = Listener::from_inherited(socket)
+                    .map_err(|e| CliError::runtime(e.to_string()))?;
+                bind_listener(
+                    &config,
+                    listener,
+                    tables,
+                    sink.clone(),
+                    Arc::new(SystemClock::new()),
+                    Arc::new(OsRandom),
+                )
+            }
+            None => bind_with(&config, tables, sink.clone()).await,
+        }
+        .map_err(|e| CliError::runtime(e.to_string()))?
+        .with_usage(usage_sink, &history)
             .with_bodies(body_log(&config, &loaded.dirs.body_log(), err));
         let _ = writeln!(
             err,
-            "airmate {} listening on http://{} ({}; {} upstream(s), {} model entr{})",
+            "airmate {} listening on {} ({}; {} upstream(s), {} model entr{})",
             env!("CARGO_PKG_VERSION"),
-            gw.local_addr(),
+            gw.listen_url(),
             loaded.resolved.file.as_ref().map_or_else(
                 || "built-in defaults".to_owned(),
                 |f| format!("config {}", f.display())

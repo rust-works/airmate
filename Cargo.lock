@@ -17,12 +17,14 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "libc",
  "rustls",
  "serde",
  "serde_json",
  "serde_norway",
  "sha2",
  "tokio",
+ "tokio-rustls",
  "zeroize",
 ]
 

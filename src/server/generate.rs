@@ -1050,6 +1050,7 @@ async fn finish(
             if let Some(cap) = body_cap {
                 stream = stream.with_tap(cap);
             }
+            stream = stream.with_stop(route.shared.hard_stop.subscribe());
             let mut b = Response::builder()
                 .status(200)
                 .header("content-type", "text/event-stream")

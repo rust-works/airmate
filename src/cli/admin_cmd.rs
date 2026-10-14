@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn the_text_view_names_upstreams_failures_and_dropped_fields() {
         let v = json!({
-            "ok": false, "version": "1.2.3", "pid": 42, "uptime_secs": 3725, "listen": "127.0.0.1:9997",
+            "ok": false, "version": "1.2.3", "pid": 42, "uptime_secs": 3725, "listen": "http://127.0.0.1:9997",
             "config_hash": "abc", "requests_in_flight": 2, "upstream_key_rejections": 1,
             "upstreams": [{"name": "fw", "protocol": "chat", "url": "https://x", "healthy": false, "health_error": "503",
                 "targets": [{"target": "fw/m", "circuit": "open", "inflight": 0, "ttfb_ms": 120.4, "last_error": "boom"}]}],

@@ -316,6 +316,7 @@ pub struct TestGateway {
     pub config: Config,
     shutdown: watch::Sender<bool>,
     pub shared: Arc<airmate::server::Shared>,
+    serve_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl TestGateway {
@@ -450,13 +451,23 @@ impl TestGateway {
         let addr = gw.local_addr();
         let shared = gw.shared();
         let (shutdown, rx) = watch::channel(false);
-        tokio::spawn(gw.serve(rx));
+        let serve_task = tokio::spawn(gw.serve(rx));
         Self {
             addr,
             token,
             config,
             shutdown,
             shared,
+            serve_task: std::sync::Mutex::new(Some(serve_task)),
+        }
+    }
+
+    /// Asks the gateway to shut down and waits until it has finished draining.
+    pub async fn shutdown_and_wait(&self) {
+        let _ = self.shutdown.send(true);
+        let task = self.serve_task.lock().unwrap().take();
+        if let Some(t) = task {
+            let _ = t.await;
         }
     }
 

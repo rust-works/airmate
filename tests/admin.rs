@@ -121,7 +121,7 @@ async fn status_reports_upstreams_circuits_ignored_fields_and_recent_errors() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(v["listen"], g.addr.to_string());
+    assert_eq!(v["listen"], format!("http://{}", g.addr));
     assert_eq!(v["config_hash"].as_str().unwrap().len(), 12);
     let up = &v["upstreams"][0];
     assert_eq!(

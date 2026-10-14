@@ -185,29 +185,13 @@ mod unix {
     use crate::server::Shared;
 
     /// Binds the admin socket, owner-only. A socket left by a dead process is replaced; one that
-    /// answers belongs to a running gateway and is refused.
+    /// still answers belongs to a running gateway and is refused.
     ///
     /// # Errors
     ///
     /// The directory or socket cannot be created, or another gateway is serving it.
     pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        if path.exists() {
-            if std::os::unix::net::UnixStream::connect(path).is_ok() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    format!("another airmate is already serving {}", path.display()),
-                ));
-            }
-            std::fs::remove_file(path)?;
-        }
-        let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(listener)
+        crate::sys::bind_private_socket(path)
     }
 
     fn reply(status: u16, content_type: &str, body: impl Into<Bytes>) -> Response<Full<Bytes>> {

@@ -1217,7 +1217,7 @@ async fn status_reload_and_keys_talk_to_the_running_gateway_over_the_admin_socke
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["listen"], format!("127.0.0.1:{port}"));
+    assert_eq!(v["listen"], format!("http://127.0.0.1:{port}"));
 
     // A good reload succeeds; a bad one is rejected with exit 2 and the old config keeps serving.
     let o = h.cmd().arg("reload").output().unwrap();

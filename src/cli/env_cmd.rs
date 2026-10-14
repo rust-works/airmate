@@ -32,15 +32,25 @@ pub fn client_host(bind: &str) -> String {
 ///
 /// # Errors
 ///
-/// The port is 0, so there is no fixed address to print.
+/// The port is 0, so there is no fixed address to print, or the gateway listens on a Unix socket.
 pub fn base_url(config: &Config) -> Result<String, CliError> {
+    if let Some(path) = &config.server.unix_socket {
+        return Err(CliError::usage(format!(
+            "the gateway listens on the Unix socket {path}, which has no URL; clients that can use a socket connect to it directly"
+        )));
+    }
     if config.server.port == 0 {
         return Err(CliError::usage(
             "server.port is 0 (any free port), so there is no fixed address to print; set a port",
         ));
     }
     Ok(format!(
-        "http://{}:{}",
+        "{}://{}:{}",
+        if config.server.tls.is_some() {
+            "https"
+        } else {
+            "http"
+        },
         client_host(&config.server.bind),
         config.server.port
     ))
@@ -135,6 +145,21 @@ mod tests {
             base_url(&Config::default()).unwrap(),
             "http://127.0.0.1:9997"
         );
+    }
+
+    #[test]
+    fn tls_makes_it_https_and_a_unix_socket_has_no_url() {
+        let mut c = Config::default();
+        c.server.tls = Some(crate::config::schema::TlsConfig {
+            cert: "c".into(),
+            key: "k".into(),
+        });
+        assert_eq!(base_url(&c).unwrap(), "https://127.0.0.1:9997");
+        c.server.unix_socket = Some("/run/airmate.sock".into());
+        assert!(base_url(&c)
+            .unwrap_err()
+            .message
+            .contains("Unix socket /run/airmate.sock"));
     }
 
     #[test]

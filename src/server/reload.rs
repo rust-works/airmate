@@ -38,7 +38,8 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<String> {
         tls,
         max_concurrent,
         allowed_hosts,
-        insecure_remote
+        insecure_remote,
+        shutdown_timeout_secs
     );
     v
 }
@@ -72,6 +73,7 @@ pub fn reload(
         new.max_concurrent = cur.max_concurrent;
         new.allowed_hosts.clone_from(&cur.allowed_hosts);
         new.insecure_remote = cur.insecure_remote;
+        new.shutdown_timeout_secs = cur.shutdown_timeout_secs;
     }
     let (tables, warnings) = Tables::build_with(
         Arc::new(config.clone()),

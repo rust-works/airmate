@@ -123,6 +123,8 @@ pub struct ServerConfig {
     pub insecure_remote: bool,
     /// TLS material, for the `tls` feature.
     pub tls: Option<TlsConfig>,
+    /// Seconds shutdown lets in-flight requests finish before ending their streams.
+    pub shutdown_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -143,6 +145,7 @@ impl Default for ServerConfig {
             allowed_hosts: Vec::new(),
             insecure_remote: false,
             tls: None,
+            shutdown_timeout_secs: 30,
         }
     }
 }

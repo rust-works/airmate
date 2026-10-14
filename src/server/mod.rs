@@ -3,6 +3,7 @@
 pub mod anthropic;
 pub mod generate;
 pub mod guard;
+pub mod listener;
 pub mod record;
 pub mod reload;
 pub mod stream;
@@ -21,7 +22,6 @@ use hyper::http::request::Parts;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use tokio::net::TcpListener;
 use tokio::sync::{watch, Semaphore};
 
 use airmate_core::error::GatewayError;
@@ -40,6 +40,7 @@ use crate::router::ModelTable;
 use crate::secret::{Secret, SecretResolver};
 use crate::usage::{Budgets, NullUsage, UsageSink};
 use guard::{check_host, check_origin, extract_token, GuardConfig};
+pub use listener::{BindError, Listener};
 
 /// The response body type: either a buffered body or a stream.
 pub type GwBody = UnsyncBoxBody<Bytes, Infallible>;
@@ -249,8 +250,12 @@ pub struct Shared {
     pub metrics: Arc<crate::metrics::Metrics>,
     /// When the gateway started.
     pub started: std::time::Instant,
-    /// The address the gateway listens on.
-    pub listen: SocketAddr,
+    /// Where the gateway listens, as a URL (`http://127.0.0.1:9997`, `unix:/path`).
+    pub listen: String,
+    /// Set when draining has run out of time: streams still open end with an error event.
+    pub hard_stop: watch::Sender<bool>,
+    /// How long shutdown lets in-flight requests finish.
+    pub shutdown_timeout: Duration,
     tables: RwLock<Arc<Tables>>,
 }
 
@@ -277,22 +282,12 @@ impl Shared {
 
 /// A gateway bound to a socket, ready to serve.
 pub struct BoundGateway {
-    listener: TcpListener,
+    listener: Listener,
     shared: Arc<Shared>,
     addr: SocketAddr,
+    #[cfg(feature = "tls")]
+    tls: Option<tokio_rustls::TlsAcceptor>,
 }
-
-/// Why binding failed.
-#[derive(Debug)]
-pub struct BindError(pub String);
-
-impl std::fmt::Display for BindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for BindError {}
 
 /// Binds the listener. Fails closed: if the port is taken there is no fallback to another one.
 ///
@@ -336,41 +331,55 @@ pub async fn bind_with_deps(
     clock: Arc<dyn crate::router::clock::Clock>,
     random: Arc<dyn crate::router::clock::Random>,
 ) -> Result<BoundGateway, BindError> {
-    let addr: SocketAddr = format!(
-        "{}:{}",
-        if config.server.bind.contains(':') {
-            format!("[{}]", config.server.bind)
-        } else {
-            config.server.bind.clone()
-        },
-        config.server.port
-    )
-    .parse()
-    .map_err(|e| BindError(format!("invalid listen address: {e}")))?;
-    let listener = TcpListener::bind(addr).await.map_err(|e| {
-        BindError(format!(
-            "cannot listen on {addr}: {e}{}",
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                "; airmate does not fall back to another port (use --port 0 to ask for any free port)"
-            } else {
-                ""
-            }
-        ))
-    })?;
-    let local = listener
-        .local_addr()
-        .map_err(|e| BindError(e.to_string()))?;
+    let listener = Listener::bind(&config.server).await?;
+    bind_listener(config, listener, tables, log, clock, random)
+}
+
+/// Like [`bind_with_deps`] on a listener that is already open: a Unix-domain socket, or a socket a
+/// service manager passed in.
+///
+/// # Errors
+///
+/// TLS material that cannot be read, or TLS configured in a build without the `tls` feature.
+pub fn bind_listener(
+    config: &Config,
+    listener: Listener,
+    tables: Tables,
+    log: Arc<dyn RecordSink>,
+    clock: Arc<dyn crate::router::clock::Clock>,
+    random: Arc<dyn crate::router::clock::Random>,
+) -> Result<BoundGateway, BindError> {
+    #[cfg(feature = "tls")]
+    let tls = config
+        .server
+        .tls
+        .as_ref()
+        .map(listener::tls_acceptor)
+        .transpose()?;
+    #[cfg(not(feature = "tls"))]
+    if config.server.tls.is_some() {
+        return Err(BindError(
+            "`server.tls` is set but this build of airmate has no `tls` feature".to_owned(),
+        ));
+    }
+    let local = listener.local_addr();
     let metrics = crate::metrics::Metrics::new();
+    let (hard_stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
         guard: GuardConfig {
-            bound_port: Some(local.port()),
+            bound_port: listener.port(),
             allowed_hosts: config.server.allowed_hosts.clone(),
         },
         permits: Arc::new(Semaphore::new(config.server.max_concurrent as usize)),
         log: Arc::new(crate::metrics::MeteredSink::new(log, metrics.clone())),
         metrics,
         started: std::time::Instant::now(),
-        listen: local,
+        #[cfg(feature = "tls")]
+        listen: listener.describe(tls.is_some()),
+        #[cfg(not(feature = "tls"))]
+        listen: listener.describe(false),
+        hard_stop,
+        shutdown_timeout: Duration::from_secs(config.server.shutdown_timeout_secs),
         limits: crate::router::limits::Limits::new(clock.clone()),
         usage: Arc::new(NullUsage),
         bodies: Arc::new(crate::bodylog::NullBodies),
@@ -387,6 +396,8 @@ pub async fn bind_with_deps(
         listener,
         shared,
         addr: local,
+        #[cfg(feature = "tls")]
+        tls,
     })
 }
 
@@ -434,24 +445,37 @@ impl BoundGateway {
         self.shared.clone()
     }
 
-    /// Accepts connections until `shutdown` is set.
+    /// Where it listens, as a URL.
+    #[must_use]
+    pub fn listen_url(&self) -> String {
+        self.shared.listen.clone()
+    }
+
+    /// Accepts connections until `shutdown` is set, then drains: no new connections, idle ones
+    /// close, and requests in flight get `server.shutdown_timeout_secs` to finish. Streams still
+    /// open after that end with an `error` event rather than being cut off.
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) {
         tokio::spawn(crate::router::health::run(
             self.shared.clone(),
             shutdown.clone(),
         ));
+        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
         let mut backoff = Duration::from_millis(5);
+        let mut last_alert: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
                 accepted = self.listener.accept() => match accepted {
-                    Ok((stream, _)) => {
+                    Ok(conn) => {
                         backoff = Duration::from_millis(5);
-                        let shared = self.shared.clone();
-                        tokio::spawn(async move { serve_connection(stream, shared).await });
+                        self.spawn_connection(conn, &graceful);
                     }
                     Err(e) => {
-                        // EMFILE and friends: back off instead of spinning.
-                        eprintln!("airmate: accept failed: {e}; retrying in {backoff:?}");
+                        // EMFILE and friends: back off instead of spinning, and say so at most
+                        // once a minute rather than on every retry.
+                        if last_alert.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                            eprintln!("airmate: accept failed: {e}; backing off");
+                            last_alert = Some(std::time::Instant::now());
+                        }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(1));
                     }
@@ -459,11 +483,61 @@ impl BoundGateway {
                 _ = shutdown.changed() => break,
             }
         }
+        self.listener.cleanup();
+        let drain = graceful.shutdown();
+        tokio::pin!(drain);
+        let grace = self.shared.shutdown_timeout;
+        if tokio::time::timeout(grace, &mut drain).await.is_err() {
+            eprintln!(
+                "airmate: {} second(s) passed with requests still open; ending their streams",
+                grace.as_secs()
+            );
+            let _ = self.shared.hard_stop.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut drain).await;
+        }
+    }
+
+    fn spawn_connection(
+        &self,
+        conn: listener::Accepted,
+        graceful: &hyper_util::server::graceful::GracefulShutdown,
+    ) {
+        let shared = self.shared.clone();
+        match conn {
+            listener::Accepted::Tcp(stream) => {
+                let _ = stream.set_nodelay(true);
+                #[cfg(feature = "tls")]
+                if let Some(acceptor) = self.tls.clone() {
+                    let watcher = graceful.watcher();
+                    tokio::spawn(async move {
+                        // A handshake that never finishes must not hold a task forever.
+                        let hs =
+                            tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream));
+                        if let Ok(Ok(tls)) = hs.await {
+                            serve_connection_watched(tls, shared, watcher).await;
+                        }
+                    });
+                    return;
+                }
+                let watcher = graceful.watcher();
+                tokio::spawn(serve_connection_watched(stream, shared, watcher));
+            }
+            #[cfg(unix)]
+            listener::Accepted::Unix(stream) => {
+                let watcher = graceful.watcher();
+                tokio::spawn(serve_connection_watched(stream, shared, watcher));
+            }
+        }
     }
 }
 
-async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
-    let _ = stream.set_nodelay(true);
+async fn serve_connection_watched<S>(
+    stream: S,
+    shared: Arc<Shared>,
+    watcher: hyper_util::server::graceful::Watcher,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let service = service_fn(move |req| {
         let shared = shared.clone();
         async move { Ok::<_, Infallible>(handle(shared, req).await) }
@@ -472,7 +546,9 @@ async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
     http.timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30))
         .keep_alive(true);
-    let _ = http.serve_connection(TokioIo::new(stream), service).await;
+    let _ = watcher
+        .watch(http.serve_connection(TokioIo::new(stream), service))
+        .await;
 }
 
 /// Runs the guard: Host, Origin and Sec-Fetch-Site, then the token.

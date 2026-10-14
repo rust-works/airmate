@@ -188,6 +188,7 @@ pub struct StreamBody {
     finished: bool,
     on_done: Option<OnDone>,
     tap: Option<Tap>,
+    stop: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
     _permits: Vec<OwnedSemaphorePermit>,
 }
 
@@ -234,8 +235,18 @@ impl StreamBody {
             finished: false,
             on_done,
             tap: None,
+            stop: None,
             _permits: permits,
         }
+    }
+
+    /// Ends the stream with an error event when `stop` is set (shutdown ran out of patience).
+    #[must_use]
+    pub fn with_stop(mut self, mut stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.stop = Some(Box::pin(async move {
+            let _ = stop.wait_for(|stopped| *stopped).await;
+        }));
+        self
     }
 
     /// Keeps the first `cap` bytes sent to the client, and their total, for the summary.
@@ -320,6 +331,15 @@ impl Body for StreamBody {
                     this.finished = true;
                 }
                 Poll::Pending => {
+                    if let Some(stop) = this.stop.as_mut() {
+                        if stop.as_mut().poll(cx).is_ready() {
+                            this.stop = None;
+                            let out = this.pipe.fail("the gateway is shutting down");
+                            this.queue(out);
+                            this.finished = true;
+                            continue;
+                        }
+                    }
                     if this.idle.as_mut().poll(cx).is_ready() {
                         let out = this.pipe.fail(&format!(
                             "the upstream was silent for {} seconds",

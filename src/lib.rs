@@ -15,4 +15,5 @@ pub mod obs;
 pub mod router;
 pub mod secret;
 pub mod server;
+pub mod sys;
 pub mod usage;
