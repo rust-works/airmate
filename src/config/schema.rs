@@ -74,6 +74,8 @@ pub struct Config {
     pub clients: Vec<ClientConfig>,
     /// Overrides for the built-in capability catalog.
     pub catalog: Vec<CatalogOverride>,
+    /// External classifiers that rules can consult.
+    pub classifiers: Vec<ClassifierConfig>,
     /// Circuit breaker defaults.
     pub circuit: CircuitConfig,
     /// Retry and failover limits.
@@ -111,6 +113,8 @@ pub struct ServerConfig {
     pub buffer_cap_bytes: u64,
     /// Seconds of upstream silence before a keep-alive `ping` is sent to the client.
     pub keepalive_secs: u64,
+    /// Request headers that rules may match on; no other header is ever visible to a rule.
+    pub rule_headers: Vec<String>,
     /// `Host` values accepted besides loopback; required for a non-loopback bind.
     pub allowed_hosts: Vec<String>,
     /// Acknowledges the risk of a non-loopback bind without TLS.
@@ -132,6 +136,7 @@ impl Default for ServerConfig {
             think_tags: yes(),
             buffer_cap_bytes: default_buffer_cap(),
             keepalive_secs: 15,
+            rule_headers: Vec::new(),
             allowed_hosts: Vec::new(),
             insecure_remote: false,
             tls: None,
@@ -664,6 +669,38 @@ pub struct ClientConfig {
     /// A model entry to fall back to when the budget is exhausted, instead of answering 429.
     #[serde(default)]
     pub budget_fallback: Option<String>,
+}
+
+/// What a classifier may see of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierInputField {
+    /// The text of the last user message.
+    LastUserMessage,
+    /// The system prompt.
+    System,
+    /// A short digest: message and tool counts and the estimated size.
+    Summary,
+}
+
+fn default_classifier_timeout() -> u64 {
+    300
+}
+
+/// `classifiers:` an external HTTP endpoint that labels a request, for example by complexity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifierConfig {
+    /// The name rules refer to.
+    pub name: String,
+    /// The endpoint. It receives `{"input": {...}}` and answers `{"label": "..."}`.
+    pub url: String,
+    /// How long to wait, in milliseconds. A slow or failing classifier gives no label.
+    #[serde(default = "default_classifier_timeout")]
+    pub timeout_ms: u64,
+    /// What the classifier is allowed to see. Never the upstream key.
+    #[serde(default)]
+    pub input: Vec<ClassifierInputField>,
 }
 
 /// `catalog:` an override of what a model can do. Only the fields set are overridden.

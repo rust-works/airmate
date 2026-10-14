@@ -330,6 +330,33 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
     }
     let models: HashSet<&str> = c.models.iter().map(|m| m.entry_name()).collect();
 
+    let mut classifier_names = HashSet::new();
+    for cl in &c.classifiers {
+        if !name_ok(&cl.name) || !classifier_names.insert(cl.name.as_str()) {
+            out.push(ConfigError::new(
+                format!("classifiers[{}]", cl.name),
+                "classifier names must be unique and use only letters, digits, `_`, `-` and `.`",
+            ));
+        }
+        if let Some(problem) = url_problem(&cl.url) {
+            out.push(ConfigError::new(
+                format!("classifiers[{}].url", cl.name),
+                problem,
+            ));
+        }
+        if cl.timeout_ms == 0 {
+            out.push(ConfigError::new(
+                format!("classifiers[{}].timeout_ms", cl.name),
+                "must be at least 1",
+            ));
+        }
+    }
+    let allowed_headers: HashSet<String> = c
+        .server
+        .rule_headers
+        .iter()
+        .map(|h| h.to_ascii_lowercase())
+        .collect();
     let mut rule_names = HashSet::new();
     for r in &c.rules {
         if r.name.is_empty() || !rule_names.insert(r.name.as_str()) {
@@ -339,6 +366,22 @@ pub fn validate(c: &Config) -> Vec<ConfigError> {
             ));
         }
         check_rule(r, &models, &upstreams, &mut out);
+        for h in r.when.header.keys() {
+            if !allowed_headers.contains(&h.to_ascii_lowercase()) {
+                out.push(ConfigError::new(
+                    format!("rules[{}].when.header.{h}", r.name),
+                    "add the header to `server.rule_headers` to let rules match on it",
+                ));
+            }
+        }
+        if let Some(cm) = &r.when.classifier {
+            if !classifier_names.contains(cm.name.as_str()) {
+                out.push(ConfigError::new(
+                    format!("rules[{}].when.classifier", r.name),
+                    format!("`{}` is not a configured classifier", cm.name),
+                ));
+            }
+        }
     }
 
     let mut client_names = HashSet::new();

@@ -22,6 +22,8 @@ pub enum RecordKind {
     Request,
     /// One per upstream attempt.
     Attempt,
+    /// One per call to an external classifier.
+    Classifier,
 }
 
 /// One log record.
