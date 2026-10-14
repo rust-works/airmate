@@ -16,7 +16,7 @@ use super::catalog::{filter, Capabilities, Catalog, Skip, SkipReason};
 use super::rules::{Action, CompiledRule, RuleCtx, RuleSet};
 use super::state::{RouterState, TargetState, UpstreamHealth};
 use super::strategy::{order, prefer, Candidate};
-use super::table::{ModelEntry, ModelTable, Resolution, RouteTarget};
+use super::table::{ModelEntry, ModelTable, Resolution, RouteTarget, Via};
 use crate::config::schema::{Config, StrategyName};
 
 /// A target to try, with what the attempt loop needs.
@@ -47,6 +47,8 @@ pub struct Route {
     pub entry_name: String,
     /// The rule that chose it, if any.
     pub rule: Option<String>,
+    /// How the model name resolved when no rule chose.
+    pub via: Option<Via>,
     /// How the targets were ordered.
     pub strategy: StrategyName,
     /// The targets to try, in order.
@@ -107,11 +109,13 @@ pub async fn plan(
     };
     let selected = rules.select(&ctx, &classifier_input).await;
 
-    let (entry, rule) =
+    let (entry, rule, via) =
         match selected.and_then(|r| rule_to_entry(r, table).map(|e| (e, r.name.clone()))) {
-            Some((e, name)) => (e, Some(name)),
-            None => match table.resolve(&facts.model, facts.inbound) {
-                Resolution::Entry(e) | Resolution::Direct(e) if !e.targets.is_empty() => (e, None),
+            Some((e, name)) => (e, Some(name), None),
+            None => match table.resolve_via(&facts.model, facts.inbound) {
+                (Resolution::Entry(e) | Resolution::Direct(e), via) if !e.targets.is_empty() => {
+                    (e, None, via)
+                }
                 _ => {
                     return Err(GatewayError::new(
                         ErrorKind::NotFound,
@@ -172,6 +176,7 @@ pub async fn plan(
     Ok(Route {
         entry_name: entry.name.clone(),
         rule,
+        via,
         strategy: entry.strategy,
         targets,
         skipped,

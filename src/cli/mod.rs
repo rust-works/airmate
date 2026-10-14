@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod env_cmd;
+pub mod route_cmd;
 pub mod run_cmd;
 pub mod serve;
 
@@ -45,6 +46,14 @@ pub enum Command {
     Run(RunArgs),
     /// Print the field policy table.
     Fields(FieldsArgs),
+    /// Show which targets would serve a captured request, and why.
+    Route(RouteArgs),
+    /// List the model table with each target's capabilities and the catalog's blind spots.
+    Models {
+        /// Exit 3 if any target has no catalog entry.
+        #[arg(long)]
+        check: bool,
+    },
     /// Inspect and check the configuration.
     Config {
         /// What to do.
@@ -137,6 +146,28 @@ pub struct RunArgs {
     pub command: Vec<String>,
 }
 
+/// `route` options.
+#[derive(Debug, Args)]
+pub struct RouteArgs {
+    /// Print the resolution steps instead of just the ordered targets.
+    #[arg(long)]
+    pub explain: bool,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// The protocol the request is in.
+    #[arg(long, value_enum, default_value = "anthropic")]
+    pub inbound: InboundArg,
+    /// The client making the request, for rules that match on it.
+    #[arg(long, default_value = "default")]
+    pub client: String,
+    /// A request header, as NAME=VALUE (only headers in `server.rule_headers` are visible to rules).
+    #[arg(long = "header", value_name = "NAME=VALUE")]
+    pub headers: Vec<String>,
+    /// The request body file, or `-` for stdin.
+    pub file: String,
+}
+
 /// `fields` options.
 #[derive(Debug, Args)]
 pub struct FieldsArgs {
@@ -216,6 +247,17 @@ fn dispatch(
         Command::Env(a) => env_command(p, global, a, out),
         Command::Run(a) => run_cmd::run(p, global, a.client.as_deref(), &a.command, err),
         Command::Fields(a) => fields(a, out),
+        Command::Route(a) => {
+            let inbound = match a.inbound {
+                InboundArg::Anthropic => Protocol::Anthropic,
+                InboundArg::Chat => Protocol::Chat,
+                InboundArg::Responses => Protocol::Responses,
+            };
+            route_cmd::route(
+                p, global, inbound, &a.file, &a.client, &a.headers, a.explain, a.json, out,
+            )
+        }
+        Command::Models { check } => route_cmd::models(p, global, *check, out),
         Command::Config { action } => config_command(p, global, action, out),
         #[cfg(feature = "completions")]
         Command::Completions { shell } => {

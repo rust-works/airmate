@@ -120,6 +120,30 @@ pub enum Resolution {
     NotFound,
 }
 
+/// How a name came to resolve to its entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Via {
+    /// The name is an exact entry in the table.
+    Exact,
+    /// The name matched a glob.
+    Glob(String),
+    /// The name is a direct upstream model name.
+    Direct,
+    /// Nothing else matched, so the default entry answered.
+    Default,
+}
+
+impl std::fmt::Display for Via {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact => f.write_str("an exact name"),
+            Self::Glob(g) => write!(f, "the glob `{g}`"),
+            Self::Direct => f.write_str("a direct upstream model name"),
+            Self::Default => f.write_str("the default entry"),
+        }
+    }
+}
+
 /// The model table.
 #[derive(Debug, Default)]
 pub struct ModelTable {
@@ -235,28 +259,37 @@ impl ModelTable {
     /// family), then the default entry (`*`).
     #[must_use]
     pub fn resolve(&self, name: &str, inbound: Protocol) -> Resolution {
+        self.resolve_via(name, inbound).0
+    }
+
+    /// Like [`ModelTable::resolve`], also saying how the name resolved.
+    #[must_use]
+    pub fn resolve_via(&self, name: &str, inbound: Protocol) -> (Resolution, Option<Via>) {
         if let Some(e) = self
             .entries
             .iter()
             .find(|e| !is_glob(&e.pattern) && e.pattern == name)
         {
-            return Resolution::Entry(e.clone());
+            return (Resolution::Entry(e.clone()), Some(Via::Exact));
         }
         if let Some(e) = self
             .entries
             .iter()
             .find(|e| e.pattern != "*" && is_glob(&e.pattern) && glob_match(&e.pattern, name))
         {
-            return Resolution::Entry(e.clone());
+            return (
+                Resolution::Entry(e.clone()),
+                Some(Via::Glob(e.pattern.clone())),
+            );
         }
         if !in_own_family(inbound, name) {
             if let Some(direct) = self.direct(name) {
-                return Resolution::Direct(direct);
+                return (Resolution::Direct(direct), Some(Via::Direct));
             }
         }
         match self.entries.iter().find(|e| e.pattern == "*") {
-            Some(e) => Resolution::Entry(e.clone()),
-            None => Resolution::NotFound,
+            Some(e) => (Resolution::Entry(e.clone()), Some(Via::Default)),
+            None => (Resolution::NotFound, None),
         }
     }
 

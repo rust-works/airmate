@@ -13,4 +13,4 @@ pub mod state;
 pub mod strategy;
 pub mod table;
 
-pub use table::{in_own_family, ModelEntry, ModelTable, Resolution, RouteTarget, UpstreamRt};
+pub use table::{in_own_family, ModelEntry, ModelTable, Resolution, RouteTarget, UpstreamRt, Via};

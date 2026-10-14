@@ -223,6 +223,20 @@ impl SecretResolver for SystemResolver<'_> {
     }
 }
 
+/// A resolver that never touches the environment, files or helpers: every reference resolves to an
+/// empty placeholder. For commands that explain routing without calling anyone.
+#[derive(Debug, Default)]
+pub struct OfflineResolver;
+
+impl SecretResolver for OfflineResolver {
+    fn resolve(&self, _: &SecretRef) -> Result<Resolved, SecretError> {
+        Ok(Resolved {
+            secret: Secret::new("offline"),
+            warning: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +387,21 @@ mod tests {
         assert!(SystemResolver::new(&e)
             .resolve(&SecretRef::Value(Redacted(String::new())))
             .is_err());
+    }
+
+    #[test]
+    fn the_offline_resolver_never_fails_and_never_reads_anything() {
+        let r = OfflineResolver
+            .resolve(&SecretRef::Env("DEFINITELY_NOT_SET".into()))
+            .unwrap();
+        assert_eq!(r.secret.expose(), "offline");
+        assert!(r.warning.is_none());
+        assert!(
+            OfflineResolver
+                .resolve(&SecretRef::Command(vec!["rm".into()]))
+                .is_ok(),
+            "no command is run"
+        );
     }
 
     #[test]
