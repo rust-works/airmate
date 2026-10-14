@@ -1,0 +1,47 @@
+# Homebrew formula for airmate. `release.yml` fills in the version and checksums from the release
+# archives and attaches the result to the release as `airmate.rb`; copy it into the tap.
+class Airmate < Formula
+  desc "A local, default-closed router for AI requests"
+  homepage "https://github.com/rust-works/airmate"
+  version "@VERSION@"
+  license "BSD-3-Clause"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/rust-works/airmate/releases/download/v@VERSION@/airmate-macos-arm64.tar.gz"
+      sha256 "@SHA_MACOS_ARM64@"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/rust-works/airmate/releases/download/v@VERSION@/airmate-linux.tar.gz"
+      sha256 "@SHA_LINUX@"
+    end
+    on_arm do
+      url "https://github.com/rust-works/airmate/releases/download/v@VERSION@/airmate-linux-arm64.tar.gz"
+      sha256 "@SHA_LINUX_ARM64@"
+    end
+  end
+
+  def install
+    bin.install "airmate"
+    generate_completions_from_executable(bin/"airmate", "completions")
+  end
+
+  # `airmate service install` registers a per-user launchd agent or systemd unit; Homebrew's own
+  # service wrapper would register a second one, so none is declared here.
+
+  def caveats
+    <<~EOS
+      Start the gateway at login and on first connect with:
+        airmate service install
+      Point a client at it with:
+        airmate env
+    EOS
+  end
+
+  test do
+    assert_match "airmate #{version}", shell_output("#{bin}/airmate version")
+  end
+end

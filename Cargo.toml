@@ -14,6 +14,8 @@ readme = "README.md"
 keywords = ["ai", "llm", "router", "gateway", "anthropic"]
 categories = ["command-line-utilities"]
 rust-version = "1.88.0"
+# Packaging and repository plumbing stay out of the crates.io tarball.
+exclude = [".github/", ".omni-dev/", "packaging/", "Dockerfile", ".dockerignore"]
 
 [dependencies]
 # The sans-I/O translation core.

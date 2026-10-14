@@ -137,7 +137,7 @@ async fn a_socket_passed_in_by_a_service_manager_is_used_as_is() {
     task.await.unwrap();
 }
 
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "tls", unix))]
 mod tls {
     use super::*;
     use std::path::{Path, PathBuf};
