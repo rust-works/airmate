@@ -1,6 +1,8 @@
 //! Outbound adapters: build an upstream request from the IR and read the reply.
 
 pub mod anthropic;
+pub mod anthropic_build;
+pub mod anthropic_parse;
 pub mod chat;
 pub mod chat_parse;
 pub mod responses;

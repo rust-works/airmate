@@ -45,15 +45,21 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
         body.insert("stream_options".into(), json!({"include_usage": true}));
     }
 
+    // 0 means the client did not set a limit (OpenAI-shaped inbounds): send none.
     let limit = target
         .max_output_tokens_cap
-        .map_or(req.max_output_tokens, |c| c.min(req.max_output_tokens));
-    if limit == 0 {
-        return Err(reject("max_tokens", "`max_tokens` must be greater than 0"));
+        .map_or(req.max_output_tokens, |c| {
+            if req.max_output_tokens == 0 {
+                c
+            } else {
+                c.min(req.max_output_tokens)
+            }
+        });
+    if limit > 0 {
+        let field = flavor.token_limit_field(Protocol::Chat, reasoning_model);
+        debug_assert_ne!(field, TokenLimitField::MaxOutputTokens);
+        body.insert(field.key().into(), json!(limit));
     }
-    let field = flavor.token_limit_field(Protocol::Chat, reasoning_model);
-    debug_assert_ne!(field, TokenLimitField::MaxOutputTokens);
-    body.insert(field.key().into(), json!(limit));
 
     // Sampling.
     if reasoning_model {
@@ -444,16 +450,19 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_limit_is_rejected_and_a_cap_clamps() {
+    fn an_unset_limit_is_omitted_and_a_cap_clamps() {
         let mut r = ir();
         r.max_output_tokens = 0;
-        assert_eq!(
-            build(&r, &target(Flavor::Generic, "m")).unwrap_err().field,
-            "max_tokens"
-        );
+        let b = built(&r, &target(Flavor::Generic, "m"));
+        assert!(b.get("max_tokens").is_none() && b.get("max_completion_tokens").is_none());
         let mut t = target(Flavor::Generic, "m");
         t.max_output_tokens_cap = Some(50);
         assert_eq!(built(&ir(), &t)["max_tokens"], 50);
+        assert_eq!(
+            built(&r, &t)["max_tokens"],
+            50,
+            "a cap applies even when the client set none"
+        );
     }
 
     #[test]

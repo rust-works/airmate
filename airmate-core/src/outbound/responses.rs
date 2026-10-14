@@ -33,10 +33,13 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
     }
     let limit = target
         .max_output_tokens_cap
-        .map_or(req.max_output_tokens, |c| c.min(req.max_output_tokens));
-    if limit == 0 {
-        return Err(reject("max_tokens", "`max_tokens` must be greater than 0"));
-    }
+        .map_or(req.max_output_tokens, |c| {
+            if req.max_output_tokens == 0 {
+                c
+            } else {
+                c.min(req.max_output_tokens)
+            }
+        });
 
     let mut ignored = Policy::collector();
     let mut names = ToolNames::new();
@@ -47,13 +50,15 @@ pub fn build(req: &IrRequest, target: &Target) -> Result<UpstreamRequest, Policy
     body.insert("store".into(), json!(false));
     body.insert("include".into(), json!(["reasoning.encrypted_content"]));
     body.insert("stream".into(), json!(req.stream));
-    body.insert(
-        flavor
-            .token_limit_field(target.protocol, false)
-            .key()
-            .into(),
-        json!(limit),
-    );
+    if limit > 0 {
+        body.insert(
+            flavor
+                .token_limit_field(target.protocol, false)
+                .key()
+                .into(),
+            json!(limit),
+        );
+    }
 
     let lead: Vec<&str> = req
         .system
@@ -363,10 +368,11 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_limit_is_rejected_and_a_cap_clamps() {
+    fn an_unset_limit_is_omitted_and_a_cap_clamps() {
         let mut r = ir();
         r.max_output_tokens = 0;
-        assert_eq!(build(&r, &target("m")).unwrap_err().field, "max_tokens");
+        let b: Json = serde_json::from_slice(&build(&r, &target("m")).unwrap().body).unwrap();
+        assert!(b.get("max_output_tokens").is_none());
         let mut t = target("m");
         t.max_output_tokens_cap = Some(7);
         let b: Json = serde_json::from_slice(&build(&ir(), &t).unwrap().body).unwrap();
