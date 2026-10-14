@@ -208,3 +208,287 @@ async fn an_image_by_url_is_refused_because_gemini_needs_bytes() {
     );
     assert_eq!(mock.count(), 0);
 }
+
+// ---- Gemini as the client's protocol ---------------------------------------------------------
+
+fn chat_reply(content: &str) -> Value {
+    json!({"id": "c", "model": "m", "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 9, "completion_tokens": 3}})
+}
+
+fn chat_yaml(mock: &Mock) -> String {
+    format!(
+        "server:\n  affinity: false\nupstreams:\n  - {{ name: up, url: \"{}\" }}\nmodels:\n  - {{ match: \"gemini-*\", targets: [ {{ upstream: up, model: upstream-m }} ] }}\n",
+        mock.url()
+    )
+}
+
+async fn post_gemini(g: &TestGateway, path: &str, body: &Value) -> support::Resp {
+    g.post_with(path, body, &[("x-goog-api-key", &g.token)])
+        .await
+}
+
+#[tokio::test]
+async fn a_gemini_client_reaches_a_chat_upstream() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("hello from chat"))).await;
+    let g = TestGateway::start(&chat_yaml(&mock)).await;
+    let r = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:generateContent",
+        &json!({"systemInstruction": {"parts": [{"text": "be brief"}]}, "contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 50}}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let v = r.json();
+    assert_eq!(
+        v["candidates"][0]["content"]["parts"][0]["text"],
+        "hello from chat"
+    );
+    assert_eq!(v["candidates"][0]["finishReason"], "STOP");
+    assert_eq!(
+        v["modelVersion"], "gemini-2.5-pro",
+        "the reply names the model the client asked for"
+    );
+    assert_eq!(v["usageMetadata"]["promptTokenCount"], 9);
+    let sent = mock.recorded()[0].json();
+    assert_eq!(sent["model"], "upstream-m");
+    assert_eq!(
+        sent["messages"][0],
+        json!({"role": "system", "content": "be brief"})
+    );
+    assert_eq!(sent["max_tokens"], 50);
+}
+
+#[tokio::test]
+async fn a_gemini_stream_needs_alt_sse_and_arrives_as_chunks() {
+    let mock = Mock::start(|_| {
+        let c = |d: &Value, f: Value| Part::Bytes(format!("data: {}\n\n", json!({"id": "c", "model": "m", "choices": [{"index": 0, "delta": d, "finish_reason": f}]})).into_bytes());
+        Reply::sse(vec![
+            c(&json!({"role": "assistant", "content": "str"}), Value::Null),
+            c(&json!({"content": "eam"}), Value::Null),
+            c(&json!({}), json!("stop")),
+            Part::Bytes(b"data: [DONE]\n\n".to_vec()),
+        ])
+    })
+    .await;
+    let g = TestGateway::start(&chat_yaml(&mock)).await;
+    let body = json!({"contents": [{"parts": [{"text": "hi"}]}]});
+    let no_sse = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+        &body,
+    )
+    .await;
+    assert_eq!(no_sse.status, 400);
+    assert!(
+        no_sse.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("alt=sse"),
+        "{}",
+        no_sse.text()
+    );
+    assert_eq!(
+        no_sse.json()["error"]["status"],
+        "INVALID_ARGUMENT",
+        "errors use the Gemini envelope"
+    );
+
+    let r = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+        &body,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let t = r.text();
+    assert!(
+        t.contains("\"text\":\"str\"")
+            && t.contains("\"text\":\"eam\"")
+            && t.contains("\"finishReason\":\"STOP\""),
+        "{t}"
+    );
+    assert!(!t.contains("[DONE]"), "Gemini streams have no end marker");
+}
+
+#[tokio::test]
+async fn function_calling_round_trips_from_a_gemini_client_through_a_chat_upstream() {
+    let mock = Mock::start(|r| {
+        let msgs = r.json()["messages"].as_array().unwrap().len();
+        if msgs == 1 {
+            Reply::json(200, json!({"id": "c", "model": "m", "choices": [{"index": 0, "message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_9", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 5, "completion_tokens": 2}}))
+        } else {
+            Reply::json(200, chat_reply("sunny"))
+        }
+    })
+    .await;
+    let g = TestGateway::start(&chat_yaml(&mock)).await;
+    let tools = json!([{"functionDeclarations": [{"name": "get_weather", "description": "w", "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}}}]}]);
+    let first = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:generateContent",
+        &json!({"contents": [{"role": "user", "parts": [{"text": "weather?"}]}], "tools": tools}),
+    )
+    .await;
+    assert_eq!(first.status, 200, "{}", first.text());
+    let call = first.json()["candidates"][0]["content"]["parts"][0]["functionCall"].clone();
+    assert_eq!(
+        (
+            call["name"].as_str(),
+            call["args"].clone(),
+            call["id"].as_str()
+        ),
+        (
+            Some("get_weather"),
+            json!({"city": "Paris"}),
+            Some("call_9")
+        )
+    );
+    let sent = mock.recorded()[0].json();
+    assert_eq!(
+        sent["tools"][0]["function"]["parameters"],
+        json!({"type": "object", "properties": {"city": {"type": "string"}}})
+    );
+
+    let second = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:generateContent",
+        &json!({"contents": [
+            {"role": "user", "parts": [{"text": "weather?"}]},
+            {"role": "model", "parts": [{"functionCall": call}]},
+            {"role": "user", "parts": [{"functionResponse": {"id": "call_9", "name": "get_weather", "response": {"output": "sunny"}}}]}
+        ], "tools": tools}),
+    )
+    .await;
+    assert_eq!(second.status, 200, "{}", second.text());
+    assert_eq!(
+        second.json()["candidates"][0]["content"]["parts"][0]["text"],
+        "sunny"
+    );
+    let msgs = mock.recorded()[1].json()["messages"].clone();
+    assert_eq!(
+        msgs[2],
+        json!({"role": "tool", "tool_call_id": "call_9", "content": "sunny"})
+    );
+}
+
+#[tokio::test]
+async fn a_gemini_client_can_reach_a_gemini_upstream_through_the_ir() {
+    let mock = Mock::start(|_| {
+        Reply::json(
+            200,
+            gemini_reply(json!([{"text": "gemini to gemini"}]), "STOP"),
+        )
+    })
+    .await;
+    let g = start(&mock).await;
+    let r = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.0-flash:generateContent",
+        &json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(
+        r.json()["candidates"][0]["content"]["parts"][0]["text"],
+        "gemini to gemini"
+    );
+    assert_eq!(
+        mock.recorded()[0].path,
+        "/v1beta/models/gemini-2.5-flash:generateContent",
+        "the model is mapped"
+    );
+}
+
+#[tokio::test]
+async fn gemini_count_tokens_is_an_estimate_in_either_body_shape() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
+    let g = TestGateway::start(&chat_yaml(&mock)).await;
+    let contents =
+        json!([{"role": "user", "parts": [{"text": "a reasonably long sentence to count"}]}]);
+    let a = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:countTokens",
+        &json!({"contents": contents}),
+    )
+    .await;
+    assert_eq!(a.status, 200, "{}", a.text());
+    assert!(a.json()["totalTokens"].as_u64().unwrap() > 3);
+    assert_eq!(a.header("x-airmate-token-estimate"), Some("heuristic"));
+    let b = post_gemini(&g, "/v1beta/models/gemini-2.5-pro:countTokens", &json!({"generateContentRequest": {"model": "models/gemini-2.5-pro", "contents": contents}})).await;
+    assert_eq!(b.json()["totalTokens"], a.json()["totalTokens"]);
+    assert_eq!(mock.count(), 0, "nothing was sent upstream");
+}
+
+#[tokio::test]
+async fn the_gemini_model_list_and_lookup_use_gemini_shapes() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
+    let cfg = chat_yaml(&mock).replace("gemini-*", "gemini-2.5-pro");
+    let g = TestGateway::start(&cfg).await;
+    let list = g
+        .request(
+            "GET",
+            "/v1beta/models",
+            None,
+            &[("x-goog-api-key", &g.token)],
+        )
+        .await;
+    assert_eq!(list.status, 200, "{}", list.text());
+    assert_eq!(list.json()["models"][0]["name"], "models/gemini-2.5-pro");
+    assert!(list.json()["models"][0]["supportedGenerationMethods"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("generateContent")));
+    let one = g
+        .request(
+            "GET",
+            "/v1beta/models/gemini-2.5-pro",
+            None,
+            &[("x-goog-api-key", &g.token)],
+        )
+        .await;
+    assert_eq!(one.status, 200);
+    let missing = g
+        .request(
+            "GET",
+            "/v1beta/models/nope",
+            None,
+            &[("x-goog-api-key", &g.token)],
+        )
+        .await;
+    assert_eq!(missing.status, 404);
+    assert_eq!(missing.json()["error"]["status"], "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn gemini_requests_need_the_token_and_use_the_gemini_error_envelope() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
+    let g = TestGateway::start(&chat_yaml(&mock)).await;
+    let r = g
+        .post_with(
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            &json!({"contents": []}),
+            &[("x-goog-api-key", "wrong")],
+        )
+        .await;
+    assert_eq!(r.status, 401);
+    assert_eq!(
+        r.json()["error"],
+        json!({"code": 401, "message": "invalid or missing airmate token", "status": "UNAUTHENTICATED"})
+    );
+    let bad = post_gemini(
+        &g,
+        "/v1beta/models/gemini-2.5-pro:generateContent",
+        &json!({"contents": [{"parts": [{"text": "x"}]}], "cachedContent": "cachedContents/1"}),
+    )
+    .await;
+    assert_eq!(bad.status, 400);
+    assert!(
+        bad.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cachedContent"),
+        "{}",
+        bad.text()
+    );
+    assert_eq!(mock.count(), 0);
+}

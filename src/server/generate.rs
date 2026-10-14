@@ -21,6 +21,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use airmate_core::adapters;
 use airmate_core::error::{ErrorKind, GatewayError, SizeInfo, UpstreamLabel};
 use airmate_core::facts::Facts;
+use airmate_core::inbound::gemini as gemini_inbound;
 use airmate_core::inbound::InboundCtx;
 use airmate_core::ir::{IrRequest, Protocol};
 use airmate_core::outbound::anthropic::PassthroughStream;
@@ -145,8 +146,18 @@ impl Source<'_> {
                     signing_key: Some(&route.tables.signing_key),
                     count_tokens: false,
                 };
-                adapters::parse_request(route.inbound, self.body, &ctx)
-                    .map_err(|e| GatewayError::from_policy(&e))
+                match &route.gemini {
+                    Some(g) => adapters::parse_gemini_request(
+                        self.body,
+                        &ctx,
+                        &gemini_inbound::Call {
+                            model: &g.model,
+                            stream: g.streams(),
+                        },
+                    ),
+                    None => adapters::parse_request(route.inbound, self.body, &ctx),
+                }
+                .map_err(|e| GatewayError::from_policy(&e))
             })
             .as_ref()
             .map_err(Clone::clone)
@@ -173,7 +184,9 @@ fn prepare(
             ignored: Vec::new(),
         });
     }
-    if core.protocol == route.inbound {
+    // Gemini to Gemini goes through the IR like any other pair: its bodies carry no model and the
+    // path differs, so there is nothing to forward verbatim.
+    if core.protocol == route.inbound && route.inbound != Protocol::Gemini {
         return match route.inbound {
             Protocol::Anthropic => {
                 let request = passthrough::build_passthrough(src.body, &core).map_err(policy)?;
@@ -474,9 +487,16 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         Ok(b) => b,
         Err(e) => return fail(&route, e),
     };
-    let peeked = match route.endpoint {
-        super::Endpoint::Generate => adapters::peek(route.inbound, &body),
-        super::Endpoint::Embeddings => embeddings::peek(&body),
+    let peeked = match (route.endpoint, &route.gemini) {
+        (super::Endpoint::Embeddings, _) => embeddings::peek(&body),
+        (super::Endpoint::Generate, Some(g)) => adapters::peek_gemini(
+            &body,
+            &gemini_inbound::Call {
+                model: &g.model,
+                stream: g.streams(),
+            },
+        ),
+        (super::Endpoint::Generate, None) => adapters::peek(route.inbound, &body),
     };
     let facts = match peeked {
         Ok(f) => f,

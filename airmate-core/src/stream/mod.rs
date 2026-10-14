@@ -5,6 +5,7 @@
 
 pub mod anthropic_render;
 pub mod chat_render;
+pub mod gemini_render;
 pub mod responses_render;
 pub mod sequencer;
 pub mod think;

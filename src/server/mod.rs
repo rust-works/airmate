@@ -1,6 +1,7 @@
 //! The HTTP server: listener, request guard and routing.
 
 pub mod anthropic;
+pub mod gemini;
 pub mod generate;
 pub mod guard;
 pub mod listener;
@@ -67,11 +68,54 @@ pub fn request_id(headers: &hyper::HeaderMap) -> String {
     )
 }
 
+/// Whether `path` is a Gemini method call such as `/v1/models/gemini-2.5-pro:generateContent`.
+fn is_gemini_method(path: &str) -> bool {
+    path.starts_with("/v1/models/") && path.contains(':')
+}
+
+/// What the URL of a Gemini request says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeminiCall {
+    /// The model in the path.
+    pub model: String,
+    /// The method: `generateContent`, `streamGenerateContent` or `countTokens`.
+    pub method: String,
+}
+
+impl GeminiCall {
+    /// Reads `/v1beta/models/{model}:{method}` (or the same under `/v1/`).
+    #[must_use]
+    pub fn parse(path: &str) -> Option<Self> {
+        let rest = path
+            .strip_prefix("/v1beta/models/")
+            .or_else(|| path.strip_prefix("/v1/models/"))?;
+        let (model, method) = rest.split_once(':')?;
+        (!model.is_empty()
+            && !model.contains('/')
+            && matches!(
+                method,
+                "generateContent" | "streamGenerateContent" | "countTokens"
+            ))
+        .then(|| Self {
+            model: model.to_owned(),
+            method: method.to_owned(),
+        })
+    }
+
+    /// Whether the method streams.
+    #[must_use]
+    pub fn streams(&self) -> bool {
+        self.method == "streamGenerateContent"
+    }
+}
+
 /// The protocol whose error envelope an answer to `path` uses.
 #[must_use]
 pub fn protocol_for_path(path: &str) -> Protocol {
     if path.starts_with("/v1/chat/completions") || path.starts_with("/v1/embeddings") {
         Protocol::Chat
+    } else if path.starts_with("/v1beta/") || is_gemini_method(path) {
+        Protocol::Gemini
     } else if path.starts_with("/v1/responses") {
         Protocol::Responses
     } else {
@@ -564,7 +608,10 @@ pub fn run_guard(
     let header = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok());
     check_host(header("host"), &shared.guard)?;
     check_origin(header("origin"), header("sec-fetch-site"))?;
-    let token = extract_token(header("x-api-key"), header("authorization"));
+    let token = extract_token(
+        header("x-api-key").or_else(|| header("x-goog-api-key")),
+        header("authorization"),
+    );
     token
         .and_then(|t| tables.auth.authenticate(t))
         .ok_or_else(GatewayError::unauthenticated)
@@ -597,11 +644,37 @@ async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody>
         } else {
             Endpoint::Generate
         },
+        gemini: GeminiCall::parse(parts.uri.path()),
     };
     let path = parts.uri.path().to_owned();
     let resp = match (parts.method.as_str(), path.as_str()) {
         ("POST", "/v1/messages" | "/v1/chat/completions" | "/v1/responses" | "/v1/embeddings") => {
             generate::generate(route, parts, body).await
+        }
+        ("POST", _) if route.gemini.is_some() => {
+            let call = route.gemini.clone().expect("checked above");
+            if call.streams()
+                && !parts
+                    .uri
+                    .query()
+                    .is_some_and(|q| q.split('&').any(|p| p == "alt=sse"))
+            {
+                generate::fail(
+                    &route,
+                    GatewayError::new(
+                        airmate_core::error::ErrorKind::InvalidRequest,
+                        "airmate streams Gemini responses as server-sent events: add `alt=sse` to the URL",
+                    ),
+                )
+            } else if call.method == "countTokens" {
+                gemini::count_tokens(route, parts, body).await
+            } else {
+                generate::generate(route, parts, body).await
+            }
+        }
+        ("GET", "/v1beta/models") => gemini::models(&route),
+        ("GET", p) if p.starts_with("/v1beta/models/") => {
+            gemini::model(&route, &p["/v1beta/models/".len()..])
         }
         ("POST", "/v1/messages/count_tokens") => anthropic::count_tokens(route, parts, body).await,
         ("GET", "/v1/models") => anthropic::models(&route, &parts),
@@ -633,6 +706,8 @@ pub struct Route {
     pub rec: record::Recorder,
     /// What the request asks for.
     pub endpoint: Endpoint,
+    /// For a Gemini method call, what its URL says.
+    pub gemini: Option<GeminiCall>,
 }
 
 /// What a request to the generation handler asks for.

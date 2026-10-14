@@ -138,6 +138,8 @@ pub enum InboundArg {
     Chat,
     /// OpenAI Responses clients.
     Responses,
+    /// Google Gemini SDKs and the Gemini CLI.
+    Gemini,
 }
 
 /// `env` options.
@@ -194,6 +196,9 @@ pub struct RouteArgs {
     /// A request header, as NAME=VALUE (only headers in `server.rule_headers` are visible to rules).
     #[arg(long = "header", value_name = "NAME=VALUE")]
     pub headers: Vec<String>,
+    /// The model, for Gemini requests, which name it in the URL rather than the body.
+    #[arg(long)]
+    pub model: Option<String>,
     /// The request body file, or `-` for stdin.
     pub file: String,
 }
@@ -458,9 +463,19 @@ fn dispatch(
                 InboundArg::Anthropic => Protocol::Anthropic,
                 InboundArg::Chat => Protocol::Chat,
                 InboundArg::Responses => Protocol::Responses,
+                InboundArg::Gemini => Protocol::Gemini,
             };
             route_cmd::route(
-                p, global, inbound, &a.file, &a.client, &a.headers, a.explain, a.json, out,
+                p,
+                global,
+                inbound,
+                &a.file,
+                &a.client,
+                &a.headers,
+                a.explain,
+                a.json,
+                a.model.as_deref(),
+                out,
             )
         }
         Command::Keys { action } => match action {
@@ -645,6 +660,7 @@ fn env_command(
     let family = match a.inbound {
         InboundArg::Anthropic => Family::Anthropic,
         InboundArg::Chat | InboundArg::Responses => Family::OpenAi,
+        InboundArg::Gemini => Family::Gemini,
     };
     let format = match a.format {
         FormatArg::Shell => Format::Shell,
@@ -659,6 +675,7 @@ fn fields(a: &FieldsArgs, out: &mut dyn Write) -> Result<(), CliError> {
         InboundArg::Anthropic => Protocol::Anthropic,
         InboundArg::Chat => Protocol::Chat,
         InboundArg::Responses => Protocol::Responses,
+        InboundArg::Gemini => Protocol::Gemini,
     };
     let table = policy::table(protocol);
     if table.is_empty() {

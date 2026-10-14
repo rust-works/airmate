@@ -17,6 +17,7 @@ use crate::outbound::{gemini, gemini_parse};
 use crate::policy::{Parsed, PolicyError};
 use crate::stream::anthropic_render::{render_message, AnthropicRender, RenderCtx};
 use crate::stream::chat_render::{render_completion, ChatRender};
+use crate::stream::gemini_render::{render_response as render_gemini, GeminiRender};
 use crate::stream::responses_render::{render_response, ResponsesRender};
 use crate::stream::{StreamParse, StreamRender};
 
@@ -38,6 +39,85 @@ pub fn parse_request(
             field: "protocol".to_owned(),
             message: format!("`{}` is not served as an inbound protocol", other.as_str()),
         }),
+    }
+}
+
+/// Parses a Gemini `generateContent` body, whose model and streaming come from the URL.
+///
+/// # Errors
+///
+/// A [`PolicyError`] naming the field.
+pub fn parse_gemini_request(
+    body: &[u8],
+    ctx: &InboundCtx<'_>,
+    call: &inbound::gemini::Call<'_>,
+) -> Result<Parsed<IrRequest>, PolicyError> {
+    inbound::gemini::parse_request(body, ctx, call)
+}
+
+/// Reads only what routing needs from a Gemini request, without judging the rest.
+///
+/// # Errors
+///
+/// The body is not a JSON object.
+pub fn peek_gemini(body: &[u8], call: &inbound::gemini::Call<'_>) -> Result<Facts, PolicyError> {
+    let v = lenient(body)?;
+    let get = |camel: &str, snake: &str| v.get(camel).or_else(|| v.get(snake));
+    let gen = get("generationConfig", "generation_config");
+    let in_gen = |camel: &str, snake: &str| gen.and_then(|g| g.get(camel).or_else(|| g.get(snake)));
+    let contents = v.get("contents");
+    let tools = get("tools", "tools")
+        .and_then(Json::as_array)
+        .is_some_and(|ts| {
+            ts.iter().any(|t| {
+                t.get("functionDeclarations")
+                    .or_else(|| t.get("function_declarations"))
+                    .and_then(Json::as_array)
+                    .is_some_and(|d| !d.is_empty())
+            })
+        });
+    let thinking = in_gen("thinkingConfig", "thinking_config")
+        .and_then(|t| t.get("thinkingBudget").or_else(|| t.get("thinking_budget")))
+        .is_none_or(|b| b.as_i64() != Some(0))
+        && in_gen("thinkingConfig", "thinking_config").is_some();
+    let structured = in_gen("responseMimeType", "response_mime_type")
+        .and_then(Json::as_str)
+        .is_some_and(|m| m == "application/json")
+        || in_gen("responseSchema", "response_schema").is_some()
+        || in_gen("responseJsonSchema", "response_json_schema").is_some();
+    let est = contents.map_or(0, estimate_value)
+        + get("systemInstruction", "system_instruction").map_or(0, estimate_value)
+        + get("tools", "tools").map_or(0, estimate_value);
+    let max = in_gen("maxOutputTokens", "max_output_tokens")
+        .and_then(Json::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    Ok(Facts {
+        inbound: Protocol::Gemini,
+        model: call.model.to_owned(),
+        stream: call.stream,
+        tools,
+        images: contents.is_some_and(has_gemini_image),
+        thinking,
+        structured_output: structured,
+        effort: None,
+        est_input_tokens: est,
+        max_tokens: max,
+    })
+}
+
+fn has_gemini_image(v: &Json) -> bool {
+    match v {
+        Json::Array(a) => a.iter().any(has_gemini_image),
+        Json::Object(o) => {
+            o.get("inlineData")
+                .or_else(|| o.get("inline_data"))
+                .and_then(|d| d.get("mimeType").or_else(|| d.get("mime_type")))
+                .and_then(Json::as_str)
+                .is_some_and(|m| m.starts_with("image/"))
+                || o.values().any(has_gemini_image)
+        }
+        _ => false,
     }
 }
 
@@ -189,6 +269,7 @@ pub fn render_response_for(inbound: Protocol, c: &IrCompletion, ctx: &RenderCtx)
     match inbound {
         Protocol::Chat => render_completion(c, ctx),
         Protocol::Responses => render_response(c, ctx),
+        Protocol::Gemini => render_gemini(c, ctx),
         _ => render_message(c, ctx),
     }
 }
@@ -199,6 +280,7 @@ pub fn stream_renderer(inbound: Protocol, ctx: RenderCtx) -> Box<dyn StreamRende
     match inbound {
         Protocol::Chat => Box::new(ChatRender::new(ctx)),
         Protocol::Responses => Box::new(ResponsesRender::new(ctx)),
+        Protocol::Gemini => Box::new(GeminiRender::new(ctx)),
         _ => Box::new(AnthropicRender::new(ctx)),
     }
 }
@@ -267,6 +349,31 @@ mod tests {
                 && !plain.thinking
                 && !plain.structured_output
         );
+    }
+
+    #[test]
+    fn peek_reads_gemini_routing_facts_from_the_body_and_the_url() {
+        let call = inbound::gemini::Call {
+            model: "gemini-2.5-pro",
+            stream: true,
+        };
+        let f = peek_gemini(
+            &b(&json!({"contents": [{"parts": [{"text": "12345678"}, {"inlineData": {"mimeType": "image/png", "data": "AA"}}]}],
+                "tools": [{"functionDeclarations": [{"name": "t"}]}],
+                "generation_config": {"max_output_tokens": 77, "responseMimeType": "application/json", "thinkingConfig": {"thinkingBudget": 10}}})),
+            &call,
+        )
+        .unwrap();
+        assert_eq!(
+            (f.model.as_str(), f.stream, f.inbound),
+            ("gemini-2.5-pro", true, Protocol::Gemini)
+        );
+        assert!(f.tools && f.images && f.structured_output && f.thinking);
+        assert_eq!(f.max_tokens, 77);
+        assert!(f.est_input_tokens > 0);
+        let plain = peek_gemini(&b(&json!({"contents": [], "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}})), &call).unwrap();
+        assert!(!plain.tools && !plain.images && !plain.thinking && !plain.structured_output);
+        assert!(peek_gemini(b"[]", &call).is_err());
     }
 
     #[test]

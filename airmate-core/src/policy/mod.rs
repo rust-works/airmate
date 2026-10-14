@@ -15,6 +15,7 @@
 
 pub mod anthropic;
 pub mod chat;
+pub mod gemini;
 pub mod responses;
 
 use std::fmt;
@@ -220,7 +221,8 @@ pub fn table(inbound: Protocol) -> &'static [Entry] {
         Protocol::Anthropic => anthropic::TABLE,
         Protocol::Chat => chat::TABLE,
         Protocol::Responses => responses::TABLE,
-        _ => &[],
+        Protocol::Gemini => gemini::TABLE,
+        Protocol::Bedrock => &[],
     }
 }
 

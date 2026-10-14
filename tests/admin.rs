@@ -92,6 +92,13 @@ async fn a_live_socket_is_refused_and_a_stale_one_is_replaced() {
     let _stale = std::os::unix::net::UnixListener::bind(&path).unwrap();
     drop(_stale);
     assert!(path.exists(), "a dead process leaves its socket file");
+    // The kernel finishes closing the listener a moment after the drop.
+    for _ in 0..200 {
+        if std::os::unix::net::UnixStream::connect(&path).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let fresh = bind(&path).expect("a stale socket is replaced");
     drop(fresh);
     let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());

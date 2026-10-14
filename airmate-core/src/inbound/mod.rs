@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod chat;
+pub mod gemini;
 pub mod responses;
 
 use serde_json::{Map, Value as Json};

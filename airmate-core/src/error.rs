@@ -68,6 +68,21 @@ impl ErrorKind {
         }
     }
 
+    /// The Google `error.status`.
+    #[must_use]
+    pub fn google_status(self) -> &'static str {
+        match self {
+            Self::InvalidRequest | Self::RequestTooLarge => "INVALID_ARGUMENT",
+            Self::Authentication => "UNAUTHENTICATED",
+            Self::Permission => "PERMISSION_DENIED",
+            Self::NotFound => "NOT_FOUND",
+            Self::RateLimit => "RESOURCE_EXHAUSTED",
+            Self::Timeout => "DEADLINE_EXCEEDED",
+            Self::Overloaded | Self::BadGateway => "UNAVAILABLE",
+            Self::Api => "INTERNAL",
+        }
+    }
+
     /// The OpenAI `(error.type, error.code)`.
     #[must_use]
     pub fn openai_type_and_code(self) -> (&'static str, &'static str) {
@@ -251,7 +266,12 @@ impl GatewayError {
     #[must_use]
     pub fn render(&self, inbound: Protocol) -> (u16, Vec<u8>) {
         let body: Json = match inbound {
-            Protocol::Anthropic | Protocol::Gemini | Protocol::Bedrock => {
+            Protocol::Gemini => json!({"error": {
+                "code": self.status(),
+                "message": self.message,
+                "status": self.kind.google_status(),
+            }}),
+            Protocol::Anthropic | Protocol::Bedrock => {
                 let mut v = json!({"type": "error", "error": {
                     "type": self.kind.anthropic_type(),
                     "message": self.message,

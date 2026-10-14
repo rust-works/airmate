@@ -67,8 +67,24 @@ pub async fn explain(
     client: &str,
     headers: &[(String, String)],
     body: &[u8],
+    model: Option<&str>,
 ) -> Result<Explained, CliError> {
-    let facts = adapters::peek(inbound, body).map_err(|e| CliError::usage(e.message))?;
+    let facts = if inbound == Protocol::Gemini {
+        // A Gemini request names its model in the URL, not the body.
+        let model = model.ok_or_else(|| {
+            CliError::usage("a Gemini request has no model in its body: pass --model NAME")
+        })?;
+        adapters::peek_gemini(
+            body,
+            &airmate_core::inbound::gemini::Call {
+                model,
+                stream: false,
+            },
+        )
+    } else {
+        adapters::peek(inbound, body)
+    }
+    .map_err(|e| CliError::usage(e.message))?;
     let state = RouterState::new(
         Arc::new(SystemClock::new()),
         Arc::new(OsRandom),
@@ -211,6 +227,7 @@ pub fn route(
     headers: &[String],
     explain_all: bool,
     json_out: bool,
+    model: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let (tables, config) = tables(p, global)?;
@@ -227,7 +244,9 @@ pub fn route(
         .enable_all()
         .build()
         .map_err(|e| CliError::runtime(e.to_string()))?;
-    let x = rt.block_on(explain(&tables, &config, inbound, client, &hdrs, &body))?;
+    let x = rt.block_on(explain(
+        &tables, &config, inbound, client, &hdrs, &body, model,
+    ))?;
     if json_out {
         let targets: Vec<_> = x.route.targets.iter().map(|t| t.target.label()).collect();
         let skipped: Vec<_> = x.route.skipped.iter().map(ToString::to_string).collect();

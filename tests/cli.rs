@@ -1551,3 +1551,56 @@ fn a_detached_service_starts_reports_status_logs_and_stops() {
     assert!(out(&svc(&["stop"])).contains("not running"));
     assert!(!h.0.join("state/airmate/airmate.pid").exists());
 }
+
+#[test]
+fn gemini_has_a_field_table_env_variables_and_route_needs_a_model() {
+    let h = Home::new("gemini-cli");
+    let o = h
+        .cmd()
+        .args(["fields", "--inbound", "gemini"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    let t = out(&o);
+    assert!(
+        t.contains("`generationConfig.thinkingConfig`")
+            && t.contains("`cachedContent`")
+            && t.contains("rejected"),
+        "{t}"
+    );
+    let o = h
+        .cmd()
+        .args(["env", "--inbound", "gemini"])
+        .output()
+        .unwrap();
+    assert!(
+        out(&o).contains("GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:9997")
+            && out(&o).contains("GEMINI_API_KEY="),
+        "{}",
+        out(&o)
+    );
+
+    h.write_config("upstreams:\n  - { name: oa, url: \"http://x\" }\nmodels:\n  - { match: \"gemini-*\", targets: [ { upstream: oa, model: m } ] }\n");
+    let req = write_request(&h, "g.json", r#"{"contents":[{"parts":[{"text":"hi"}]}]}"#);
+    let o = h
+        .cmd()
+        .args(["route", "--inbound", "gemini", &req])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(errs(&o).contains("--model"), "{}", errs(&o));
+    let o = h
+        .cmd()
+        .args([
+            "route",
+            "--inbound",
+            "gemini",
+            "--model",
+            "gemini-2.5-pro",
+            &req,
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(out(&o).contains("oa/m"), "{}", out(&o));
+}

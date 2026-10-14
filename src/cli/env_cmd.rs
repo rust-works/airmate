@@ -15,6 +15,8 @@ pub enum Family {
     Anthropic,
     /// OpenAI SDKs.
     OpenAi,
+    /// Google Gemini SDKs and the Gemini CLI.
+    Gemini,
 }
 
 /// The host a client should use to reach the listener.
@@ -68,6 +70,10 @@ pub fn variables(family: Family, base: &str, token: &str) -> BTreeMap<String, St
         Family::OpenAi => {
             v.insert("OPENAI_BASE_URL".to_owned(), format!("{base}/v1"));
             v.insert("OPENAI_API_KEY".to_owned(), token.to_owned());
+        }
+        Family::Gemini => {
+            v.insert("GOOGLE_GEMINI_BASE_URL".to_owned(), base.to_owned());
+            v.insert("GEMINI_API_KEY".to_owned(), token.to_owned());
         }
     }
     v
