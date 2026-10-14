@@ -17,7 +17,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::usage::GroupBy;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "completions")]
+use clap::CommandFactory;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::overrides::{parse_flavor, parse_model_map, parse_protocol, Overrides};
 use crate::config::resolve::show;

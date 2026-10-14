@@ -84,6 +84,8 @@ pub struct Config {
     pub usage: UsageConfig,
     /// Logging.
     pub log: LogConfig,
+    /// OpenTelemetry trace export (the `otel` feature).
+    pub otel: Option<OtelConfig>,
     /// Named overrides, applied over the rest with `--profile <name>`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, serde_norway::Value>,
@@ -830,6 +832,31 @@ impl Default for FailoverConfig {
             retry_after_ceiling_secs: 10,
         }
     }
+}
+
+/// `otel:` where to send one trace span per request, as OTLP over HTTP with JSON bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OtelConfig {
+    /// The collector's base URL, e.g. `http://127.0.0.1:4318`; spans go to `<endpoint>/v1/traces`.
+    pub endpoint: String,
+    /// The `service.name` resource attribute.
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+    /// Extra request headers, such as a vendor API key; the values are secrets.
+    #[serde(default)]
+    pub headers: BTreeMap<String, SecretRef>,
+    /// How often a partial batch is sent, in seconds.
+    #[serde(default = "default_otel_flush")]
+    pub flush_secs: u64,
+}
+
+fn default_service_name() -> String {
+    "airmate".to_owned()
+}
+
+fn default_otel_flush() -> u64 {
+    5
 }
 
 /// `usage:` the usage ledger.

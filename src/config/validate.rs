@@ -122,6 +122,29 @@ fn check_targets(
     }
 }
 
+fn check_otel(o: &super::schema::OtelConfig, out: &mut Vec<ConfigError>) {
+    if !(o.endpoint.starts_with("http://") || o.endpoint.starts_with("https://")) {
+        out.push(ConfigError::new(
+            "otel.endpoint",
+            "must be an http:// or https:// URL",
+        ));
+    }
+    if o.flush_secs == 0 {
+        out.push(ConfigError::new("otel.flush_secs", "must be at least 1"));
+    }
+    if o.service_name.is_empty() {
+        out.push(ConfigError::new("otel.service_name", "must not be empty"));
+    }
+    for name in o.headers.keys() {
+        if hyper::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            out.push(ConfigError::new(
+                format!("otel.headers.{name}"),
+                "is not a valid header name",
+            ));
+        }
+    }
+}
+
 fn check_upstream(u: &UpstreamConfig, out: &mut Vec<ConfigError>) {
     let p = format!("upstreams[{}]", u.name);
     if !name_ok(&u.name) {
@@ -277,6 +300,9 @@ fn check_rule(
 pub fn validate(c: &Config) -> Vec<ConfigError> {
     let mut out = Vec::new();
 
+    if let Some(o) = &c.otel {
+        check_otel(o, &mut out);
+    }
     let s = &c.server;
     match s.bind.parse::<IpAddr>() {
         Err(_) => out.push(ConfigError::new(

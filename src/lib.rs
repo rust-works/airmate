@@ -13,6 +13,8 @@ pub mod doctor;
 pub mod keychain;
 pub mod metrics;
 pub mod obs;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod router;
 pub mod secret;
 pub mod server;

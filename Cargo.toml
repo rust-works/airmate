@@ -60,7 +60,10 @@ libc = "0.2.190"
 zeroize = { version = "1.9.1", features = ["derive"] }
 
 [features]
-default = ["completions", "tls"]
+default = ["completions", "tls", "otel"]
+# `otel:` exports one trace span per request as OTLP/HTTP JSON. It needs no extra crate: the spans
+# are built by hand and sent with the HTTP client the gateway already has.
+otel = []
 # `server.tls`: serve HTTPS. rustls and tokio-rustls are already in the tree for upstream calls.
 tls = ["dep:tokio-rustls"]
 # `airmate completions <shell>`.

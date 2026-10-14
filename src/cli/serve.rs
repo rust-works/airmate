@@ -45,6 +45,7 @@ pub fn serve(
         // Handlers go in before the gateway is announced: a SIGHUP that arrives first would
         // otherwise take the process down with the default action.
         let mut signals = Signals::new();
+        let sink = with_otel(&config, sink, &resolver, err);
         let (usage_sink, history) = usage_ledger(&config, &loaded.dirs.usage_ledger(), err);
         // Plenty of descriptors for concurrent streams; the default soft limit is often 256.
         let _ = crate::sys::raise_fd_limit(4096);
@@ -264,6 +265,56 @@ impl Signals {
         let _ = tokio::signal::ctrl_c().await;
         Signal::Stop
     }
+}
+
+/// Adds trace export to the request log's sink when the configuration asks for it. Header values
+/// are secrets and are resolved here, so a missing one stops nothing but the export.
+#[cfg(feature = "otel")]
+fn with_otel(
+    config: &crate::config::schema::Config,
+    sink: Arc<dyn RecordSink>,
+    resolver: &dyn crate::secret::SecretResolver,
+    err: &mut dyn Write,
+) -> Arc<dyn RecordSink> {
+    let Some(o) = &config.otel else {
+        return sink;
+    };
+    let mut headers = Vec::new();
+    for (name, secret) in &o.headers {
+        match resolver.resolve(secret) {
+            Ok(r) => headers.push((name.clone(), r.secret.expose().to_owned())),
+            Err(e) => {
+                let _ = writeln!(
+                    err,
+                    "airmate: warning: otel header `{name}` is not sent: {e}"
+                );
+            }
+        }
+    }
+    let _ = writeln!(err, "airmate: exporting traces to {}", o.endpoint);
+    crate::otel::OtelSink::start(
+        sink,
+        &o.endpoint,
+        &o.service_name,
+        headers,
+        std::time::Duration::from_secs(o.flush_secs),
+    )
+}
+
+#[cfg(not(feature = "otel"))]
+fn with_otel(
+    config: &crate::config::schema::Config,
+    sink: Arc<dyn RecordSink>,
+    _: &dyn crate::secret::SecretResolver,
+    err: &mut dyn Write,
+) -> Arc<dyn RecordSink> {
+    if config.otel.is_some() {
+        let _ = writeln!(
+            err,
+            "airmate: warning: `otel` is set but this build has no `otel` feature; no traces are sent"
+        );
+    }
+    sink
 }
 
 /// Opens the body log if the configuration asks for one. Bodies hold prompts and completions, so

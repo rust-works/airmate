@@ -143,6 +143,18 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
     Some(days * 86_400 + h * 3_600 + mi * 60 + sec)
 }
 
+/// Like [`parse_rfc3339`], in milliseconds, reading the fraction when there is one.
+#[must_use]
+pub fn parse_rfc3339_millis(s: &str) -> Option<u64> {
+    let secs = parse_rfc3339(s)?;
+    let frac = s.strip_suffix('Z')?.rsplit_once('.').map_or(0, |(_, f)| {
+        let digits: String = f.chars().take(3).collect();
+        let n: u64 = digits.parse().unwrap_or(0);
+        n * 10u64.pow(3 - u32::try_from(digits.len()).unwrap_or(3))
+    });
+    Some(secs * 1000 + frac)
+}
+
 /// Which statuses `airmate logs --status` keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusFilter {
@@ -407,6 +419,23 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn milliseconds_survive_parsing() {
+        assert_eq!(
+            parse_rfc3339_millis("2025-10-14T12:00:00.123Z"),
+            Some(1_760_443_200_123)
+        );
+        assert_eq!(
+            parse_rfc3339_millis("2025-10-14T12:00:00.5Z"),
+            Some(1_760_443_200_500)
+        );
+        assert_eq!(
+            parse_rfc3339_millis("2025-10-14T12:00:00Z"),
+            Some(1_760_443_200_000)
+        );
+        assert_eq!(parse_rfc3339_millis("nope"), None);
     }
 
     #[test]
