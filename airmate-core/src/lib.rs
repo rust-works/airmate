@@ -5,5 +5,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod estimate;
 pub mod ir;
 pub mod sse;
