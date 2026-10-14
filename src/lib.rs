@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod config;
 pub mod keychain;
+pub mod router;
 pub mod secret;
 pub mod server;
 
