@@ -128,12 +128,15 @@ pub fn load(p: &Process, global: &Global, flags: Overrides) -> Result<Loaded, Cl
         .clone()
         .unwrap_or_else(|| config_file(&dirs, &*p.env));
     let text = read_config_file(&path, explicit)?;
+    let managed =
+        crate::config::clients_file::read(&dirs.clients_file()).map_err(ConfigErrors::from)?;
     let resolved = resolve(&Inputs {
         file: text.as_deref(),
         file_path: text.as_ref().map(|_| path.clone()),
         profile: global.profile.as_deref(),
         env,
         flags,
+        managed_clients: managed.clients,
     })?;
     Ok(Loaded {
         resolved,

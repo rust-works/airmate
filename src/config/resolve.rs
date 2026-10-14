@@ -51,6 +51,8 @@ pub struct Inputs<'a> {
     pub env: Overrides,
     /// Settings from flags.
     pub flags: Overrides,
+    /// Clients from the managed `clients.yaml`, merged into the configuration.
+    pub managed_clients: Vec<super::schema::ClientConfig>,
 }
 
 /// The effective configuration.
@@ -142,6 +144,8 @@ pub fn resolve(inputs: &Inputs<'_>) -> Result<Resolved, ConfigErrors> {
     let mut final_layer = profile_layer.clone();
     merged.apply(&mut final_layer)?;
 
+    super::clients_file::merge(&mut final_layer.clients, &inputs.managed_clients)
+        .map_err(ConfigErrors::from)?;
     let problems = validate(&final_layer);
     if !problems.is_empty() {
         return Err(ConfigErrors(problems));

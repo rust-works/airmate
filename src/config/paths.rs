@@ -97,6 +97,18 @@ impl Dirs {
         self.config.join("airmate.yaml")
     }
 
+    /// The managed client file, written by `airmate keys`.
+    #[must_use]
+    pub fn clients_file(&self) -> PathBuf {
+        self.config.join("clients.yaml")
+    }
+
+    /// Where a named client's key is saved when `keys add --save` is used.
+    #[must_use]
+    pub fn client_key_file(&self, name: &str) -> PathBuf {
+        self.state.join("client-keys").join(name)
+    }
+
     /// The gateway token file.
     #[must_use]
     pub fn token_file(&self) -> PathBuf {

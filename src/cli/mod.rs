@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod env_cmd;
+pub mod keys_cmd;
 pub mod route_cmd;
 pub mod run_cmd;
 pub mod serve;
@@ -53,6 +54,12 @@ pub enum Command {
         /// Exit 3 if any target has no catalog entry.
         #[arg(long)]
         check: bool,
+    },
+    /// Create, list, revoke and rotate client keys.
+    Keys {
+        /// What to do.
+        #[command(subcommand)]
+        action: KeysAction,
     },
     /// Inspect and check the configuration.
     Config {
@@ -188,6 +195,52 @@ pub enum TableFormat {
     Json,
 }
 
+/// `keys` actions.
+#[derive(Debug, Subcommand)]
+pub enum KeysAction {
+    /// Create a client and show its key once.
+    Add {
+        /// The client's name.
+        name: String,
+        /// Model globs the client may use (repeatable; default all).
+        #[arg(long = "models", value_name = "GLOB")]
+        models: Vec<String>,
+        /// Requests per minute.
+        #[arg(long)]
+        rpm: Option<u32>,
+        /// Input tokens per minute.
+        #[arg(long)]
+        tpm: Option<u64>,
+        /// Spend cap per day, in US dollars.
+        #[arg(long)]
+        budget_per_day: Option<f64>,
+        /// Spend cap per month, in US dollars.
+        #[arg(long)]
+        budget_per_month: Option<f64>,
+        /// A model entry to fall back to when the budget is exhausted.
+        #[arg(long)]
+        budget_fallback: Option<String>,
+        /// Also save the key, owner-only, for `env --client` and `run --client`.
+        #[arg(long)]
+        save: bool,
+    },
+    /// List the clients.
+    List,
+    /// Remove a client.
+    Revoke {
+        /// The client's name.
+        name: String,
+    },
+    /// Give a client a new key.
+    Rotate {
+        /// The client's name.
+        name: String,
+        /// Also save the new key.
+        #[arg(long)]
+        save: bool,
+    },
+}
+
 /// `config` actions.
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
@@ -257,6 +310,32 @@ fn dispatch(
                 p, global, inbound, &a.file, &a.client, &a.headers, a.explain, a.json, out,
             )
         }
+        Command::Keys { action } => match action {
+            KeysAction::Add {
+                name,
+                models,
+                rpm,
+                tpm,
+                budget_per_day,
+                budget_per_month,
+                budget_fallback,
+                save,
+            } => {
+                let o = keys_cmd::AddOptions {
+                    models: models.clone(),
+                    rpm: *rpm,
+                    tpm: *tpm,
+                    budget_per_day: *budget_per_day,
+                    budget_per_month: *budget_per_month,
+                    budget_fallback: budget_fallback.clone(),
+                    save: *save,
+                };
+                keys_cmd::add(p, global, name, &o, out)
+            }
+            KeysAction::List => keys_cmd::list(p, global, out),
+            KeysAction::Revoke { name } => keys_cmd::revoke(p, global, name, out),
+            KeysAction::Rotate { name, save } => keys_cmd::rotate(p, global, name, *save, out),
+        },
         Command::Models { check } => route_cmd::models(p, global, *check, out),
         Command::Config { action } => config_command(p, global, action, out),
         #[cfg(feature = "completions")]

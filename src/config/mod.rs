@@ -2,6 +2,7 @@
 //!
 //! The default port is 9997 and is set with `server.port`.
 
+pub mod clients_file;
 pub mod load;
 pub mod overrides;
 pub mod paths;

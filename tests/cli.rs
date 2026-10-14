@@ -877,3 +877,185 @@ async fn sighup_reloads_the_configuration_and_a_bad_one_is_rejected() {
     );
     assert!(stderr.contains("max_concurrent"), "{stderr}");
 }
+
+fn key_from(text: &str) -> String {
+    text.lines()
+        .find(|l| l.starts_with("am_"))
+        .expect("the key is printed")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn keys_add_shows_the_key_once_and_stores_only_its_hash() {
+    let h = Home::new("keys-add");
+    let o = h
+        .cmd()
+        .args([
+            "keys",
+            "add",
+            "ci",
+            "--models",
+            "claude-haiku-*",
+            "--rpm",
+            "60",
+            "--budget-per-day",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    let key = key_from(&out(&o));
+    assert!(key.len() > 40);
+    assert!(out(&o).contains("shown once") && out(&o).contains("reload"));
+    let file = std::fs::read_to_string(h.0.join("config/airmate/clients.yaml")).unwrap();
+    assert!(
+        file.contains("name: ci")
+            && file.contains("key_hash: sha256:")
+            && file.contains("claude-haiku-*"),
+        "{file}"
+    );
+    assert!(!file.contains(&key), "the key itself is never stored");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(h.0.join("config/airmate/clients.yaml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    // The hash is the SHA-256 of the key, which is what the gateway compares.
+    assert!(file.contains(&airmate::auth::hash_key(&key)));
+    let list = out(&h.cmd().args(["keys", "list"]).output().unwrap());
+    assert!(
+        list.contains("ci")
+            && list.contains("keys")
+            && list.contains("claude-haiku-*")
+            && list.contains("60/min")
+            && list.contains("$5/day"),
+        "{list}"
+    );
+    assert!(!list.contains(&key));
+}
+
+#[test]
+fn keys_add_validates_before_it_writes() {
+    let h = Home::new("keys-bad");
+    let o = h.cmd().args(["keys", "add", "bad name"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!h.0.join("config/airmate/clients.yaml").exists());
+    assert!(h
+        .cmd()
+        .args(["keys", "add", "ci"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let again = h.cmd().args(["keys", "add", "ci"]).output().unwrap();
+    assert_eq!(again.status.code(), Some(2));
+    assert!(errs(&again).contains("already exists"), "{}", errs(&again));
+    let ghost = h
+        .cmd()
+        .args([
+            "keys",
+            "add",
+            "x",
+            "--budget-fallback",
+            "nope",
+            "--budget-per-day",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(ghost.status.code(), Some(2));
+    assert!(errs(&ghost).contains("budget_fallback"), "{}", errs(&ghost));
+}
+
+#[test]
+fn keys_rotate_and_revoke_work_on_managed_clients_only() {
+    let h = Home::new("keys-rotate");
+    let first = key_from(&out(&h
+        .cmd()
+        .args(["keys", "add", "ci", "--save"])
+        .output()
+        .unwrap()));
+    let saved = h.0.join("state/airmate/client-keys/ci");
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), first);
+    assert!(
+        out(&h.cmd().args(["env", "--client", "ci"]).output().unwrap()).contains(&first),
+        "env --client uses the saved key"
+    );
+    let second = key_from(&out(&h
+        .cmd()
+        .args(["keys", "rotate", "ci"])
+        .output()
+        .unwrap()));
+    assert_ne!(first, second);
+    assert_eq!(
+        std::fs::read_to_string(&saved).unwrap(),
+        second,
+        "a saved key is kept in step"
+    );
+    let file = std::fs::read_to_string(h.0.join("config/airmate/clients.yaml")).unwrap();
+    assert!(
+        file.contains(&airmate::auth::hash_key(&second))
+            && !file.contains(&airmate::auth::hash_key(&first))
+    );
+    let o = h.cmd().args(["keys", "revoke", "ci"]).output().unwrap();
+    assert!(o.status.success(), "{}", errs(&o));
+    assert!(!saved.exists(), "the saved key is removed too");
+    assert!(out(&h.cmd().args(["keys", "list"]).output().unwrap()).contains("no named clients"));
+    let o = h.cmd().args(["keys", "revoke", "ci"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(errs(&o).contains("no client named"));
+
+    h.write_config("clients:\n  - name: handmade\n    key_hash: \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n");
+    for cmd in ["revoke", "rotate"] {
+        let o = h.cmd().args(["keys", cmd, "handmade"]).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{cmd}");
+        assert!(
+            errs(&o).contains("defined in the config file"),
+            "{}",
+            errs(&o)
+        );
+    }
+    assert!(
+        out(&h.cmd().args(["keys", "list"]).output().unwrap()).contains("config"),
+        "a hand-written client is listed with its source"
+    );
+    let clash = h.cmd().args(["keys", "add", "handmade"]).output().unwrap();
+    assert_eq!(clash.status.code(), Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_made_by_the_cli_authenticates_against_a_running_gateway_and_obeys_its_limits() {
+    let mock = Mock::start(|_| {
+        Reply::json(200, serde_json::json!({"id": "c", "model": "m", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}))
+    })
+    .await;
+    let h = Home::new("keys-e2e");
+    let o = h
+        .cmd()
+        .args(["keys", "add", "tiny", "--rpm", "1", "--models", "claude-*"])
+        .output()
+        .unwrap();
+    let key = key_from(&out(&o));
+    let port = free_port();
+    h.write_config(&format!("server:\n  port: {port}\nupstreams:\n  - {{ name: up, url: \"{}\" }}\nmodels:\n  - {{ match: \"*\", targets: [ {{ upstream: up, model: m }} ] }}\n", mock.url()));
+    let mut child = h.cmd().arg("serve").stderr(Stdio::null()).spawn().unwrap();
+    wait_until_listening(port);
+    let body =
+        r#"{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+    let (s1, _) = http(port, "POST", "/v1/messages", Some(&key), body);
+    let (s2, _) = http(port, "POST", "/v1/messages", Some(&key), body);
+    let wrong =
+        r#"{"model":"gpt-4.1","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+    let (s3, _) = http(port, "POST", "/v1/messages", Some("am_not_a_key"), wrong);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!((s1, s2, s3), (200, 429, 401));
+}
