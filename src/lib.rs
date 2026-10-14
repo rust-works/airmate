@@ -4,7 +4,10 @@
 //! the OpenAI Responses API) to airmate, which translates the request, picks an upstream model,
 //! calls it, and translates the answer back, streaming included.
 
+pub mod auth;
 pub mod config;
+pub mod keychain;
+pub mod secret;
 
 /// The line the `airmate` binary prints.
 #[must_use]

@@ -7,9 +7,13 @@ name = "airmate"
 version = "0.1.0"
 dependencies = [
  "airmate-core",
+ "base64",
+ "getrandom",
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]

@@ -18,9 +18,17 @@ rust-version = "1.88.0"
 [dependencies]
 # The sans-I/O translation core.
 airmate-core = { path = "airmate-core", version = "0.1.0" }
+# Base64url for generated tokens and keys.
+base64 = "0.23.1"
+# The OS CSPRNG for tokens and keys.
+getrandom = "0.4.3"
 # Derive (de)serialisation for the configuration schema.
 serde = { version = "1.0.229", features = ["derive"] }
 # JSON for the request log, `config show` and admin output.
 serde_json = "1.0.154"
 # YAML configuration (a maintained serde_yaml fork; serde_yaml itself is archived).
 serde_norway = "0.9.42"
+# SHA-256 for client key hashes and constant-time token comparison.
+sha2 = "0.11.1"
+# Zero secrets on drop.
+zeroize = { version = "1.9.1", features = ["derive"] }

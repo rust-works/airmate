@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 /// Looks up an environment variable.
-pub type EnvFn<'a> = &'a dyn Fn(&str) -> Option<String>;
+pub type EnvFn<'a> = &'a (dyn Fn(&str) -> Option<String> + Send + Sync);
 
 /// The platform whose conventions apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
