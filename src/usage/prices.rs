@@ -123,11 +123,13 @@ impl PriceTable {
 }
 
 /// The cost of `usage` at `price`, in US dollars. Cached tokens are charged at the cache-read
-/// price when there is one, else at the input price.
+/// price when there is one, else at the input price. Tokens written to a cache are charged at the
+/// input price: providers that bill them charge at least that, and a budget that counted them as
+/// free would under-count.
 #[must_use]
 pub fn cost_usd(price: &Price, usage: &Usage) -> f64 {
     let cached_rate = price.cache_read_per_mtok.unwrap_or(price.input_per_mtok);
-    (usage.input_tokens as f64 * price.input_per_mtok
+    ((usage.input_tokens + usage.cache_creation_input_tokens) as f64 * price.input_per_mtok
         + usage.cache_read_input_tokens as f64 * cached_rate
         + usage.output_tokens as f64 * price.output_per_mtok)
         / 1_000_000.0
@@ -200,5 +202,13 @@ mod tests {
             "cached tokens fall back to the input price"
         );
         assert_eq!(cost_usd(&price(), &Usage::default()), 0.0);
+        let written = Usage {
+            cache_creation_input_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        assert!(
+            (cost_usd(&price(), &written) - 2.0).abs() < 1e-9,
+            "cache writes cost at least the input price"
+        );
     }
 }
