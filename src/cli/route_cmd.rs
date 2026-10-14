@@ -104,6 +104,7 @@ pub async fn explain(
             body,
             header: &header,
             force_entry: None,
+            embeddings: false,
         },
     )
     .await

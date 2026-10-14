@@ -215,6 +215,8 @@ pub enum SkipReason {
     Budget,
     /// The upstream asked to be left alone for a while.
     CoolingDown,
+    /// The request is for embeddings and the upstream's protocol has no embeddings endpoint.
+    NoEmbeddings,
 }
 
 impl SkipReason {
@@ -234,6 +236,7 @@ impl SkipReason {
             Self::RateLimit => "rate-limit".to_owned(),
             Self::Budget => "budget".to_owned(),
             Self::CoolingDown => "cooling-down".to_owned(),
+            Self::NoEmbeddings => "no-embeddings".to_owned(),
         }
     }
 
@@ -255,6 +258,7 @@ impl SkipReason {
             Self::RateLimit => "a rate limit is reached".to_owned(),
             Self::Budget => "the client's budget is exhausted".to_owned(),
             Self::CoolingDown => "its upstream asked for a pause".to_owned(),
+            Self::NoEmbeddings => "its upstream's protocol has no embeddings endpoint".to_owned(),
         }
     }
 

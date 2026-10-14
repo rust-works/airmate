@@ -5,6 +5,7 @@ pub mod anthropic_build;
 pub mod anthropic_parse;
 pub mod chat;
 pub mod chat_parse;
+pub mod embeddings;
 pub mod json_passthrough;
 pub mod responses;
 pub mod responses_parse;

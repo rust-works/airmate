@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use airmate_core::error::{ErrorKind, GatewayError};
 use airmate_core::facts::Facts;
+use airmate_core::ir::Protocol;
 
 use super::catalog::{filter, Capabilities, Catalog, Skip, SkipReason};
 use super::rules::{Action, CompiledRule, RuleCtx, RuleSet};
@@ -71,6 +72,8 @@ pub struct PlanInput<'a> {
     pub header: &'a (dyn Fn(&str) -> Option<String> + Sync),
     /// A model entry to use whatever the rules and the model name say (a budget fallback).
     pub force_entry: Option<&'a str>,
+    /// Whether the request is for embeddings, which only OpenAI-protocol upstreams serve.
+    pub embeddings: bool,
 }
 
 fn rule_to_entry(rule: &CompiledRule, table: &ModelTable) -> Option<Arc<ModelEntry>> {
@@ -140,7 +143,19 @@ pub async fn plan(
         },
     };
 
-    let (ok, skipped) = filter(&entry.targets, facts, catalog);
+    let (mut ok, mut skipped) = filter(&entry.targets, facts, catalog);
+    if input.embeddings {
+        ok.retain(|t| {
+            let serves = matches!(t.upstream.protocol, Protocol::Chat | Protocol::Responses);
+            if !serves {
+                skipped.push(Skip {
+                    target: t.label(),
+                    reason: SkipReason::NoEmbeddings,
+                });
+            }
+            serves
+        });
+    }
     if ok.is_empty() {
         return Err(unmet_error(&entry, &skipped, facts));
     }
@@ -395,6 +410,7 @@ mod tests {
                 body,
                 header: &none,
                 force_entry: None,
+                embeddings: false,
             },
         )
         .await
@@ -630,6 +646,7 @@ mod tests {
                 body,
                 header: &none,
                 force_entry: None,
+                embeddings: false,
             },
         )
         .await

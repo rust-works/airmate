@@ -24,6 +24,7 @@ use airmate_core::facts::Facts;
 use airmate_core::inbound::InboundCtx;
 use airmate_core::ir::{IrRequest, Protocol};
 use airmate_core::outbound::anthropic::PassthroughStream;
+use airmate_core::outbound::embeddings;
 use airmate_core::outbound::json_passthrough::{self, JsonPassthroughStream};
 use airmate_core::outbound::{anthropic as passthrough, ParseCtx, UpstreamError, UpstreamRequest};
 use airmate_core::policy::{ignored_header, Ignored, Parsed, PolicyConfig};
@@ -115,6 +116,8 @@ enum Mode {
     PassAnthropic,
     /// Forwarded as sent (Chat or Responses); the flag is whether the client wanted stream usage.
     PassJson { client_wants_usage: bool },
+    /// An embeddings request: the model mapped, the reply naming the client's model.
+    Embeddings,
 }
 
 struct Prepared {
@@ -163,6 +166,13 @@ fn prepare(
         (a, b) => a.or(b),
     };
     let policy = |e: airmate_core::policy::PolicyError| GatewayError::from_policy(&e);
+    if route.endpoint == super::Endpoint::Embeddings {
+        return Ok(Prepared {
+            request: embeddings::build(src.body, &core).map_err(policy)?,
+            mode: Mode::Embeddings,
+            ignored: Vec::new(),
+        });
+    }
     if core.protocol == route.inbound {
         return match route.inbound {
             Protocol::Anthropic => {
@@ -464,7 +474,11 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
         Ok(b) => b,
         Err(e) => return fail(&route, e),
     };
-    let facts = match adapters::peek(route.inbound, &body) {
+    let peeked = match route.endpoint {
+        super::Endpoint::Generate => adapters::peek(route.inbound, &body),
+        super::Endpoint::Embeddings => embeddings::peek(&body),
+    };
+    let facts = match peeked {
         Ok(f) => f,
         Err(e) => return fail(&route, GatewayError::from_policy(&e)),
     };
@@ -538,6 +552,7 @@ pub async fn generate(route: Route, parts: Parts, body: Incoming) -> Response<Gw
             body: &body,
             header: &header,
             force_entry: fallback,
+            embeddings: route.endpoint == super::Endpoint::Embeddings,
         },
     )
     .await
@@ -963,6 +978,12 @@ async fn finish(
                     settle(&usage);
                     rewritten
                 }
+                Mode::Embeddings => {
+                    let (rewritten, usage) = embeddings::rewrite_response(&bytes, &client_model);
+                    route.rec.usage(&usage);
+                    settle(&usage);
+                    rewritten
+                }
             };
             drop((permit, slot));
             json_ok(
@@ -989,6 +1010,12 @@ async fn finish(
                     Pipe::translate(parser, render)
                 }
                 Mode::PassAnthropic => Pipe::Passthrough(PassthroughStream::new(&client_model)),
+                // An embeddings request never streams, so no stream of this mode is delivered.
+                Mode::Embeddings => Pipe::Json(JsonPassthroughStream::new(
+                    route.inbound,
+                    &client_model,
+                    false,
+                )),
                 Mode::PassJson { client_wants_usage } => Pipe::Json(JsonPassthroughStream::new(
                     route.inbound,
                     &client_model,

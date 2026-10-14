@@ -70,7 +70,7 @@ pub fn request_id(headers: &hyper::HeaderMap) -> String {
 /// The protocol whose error envelope an answer to `path` uses.
 #[must_use]
 pub fn protocol_for_path(path: &str) -> Protocol {
-    if path.starts_with("/v1/chat/completions") {
+    if path.starts_with("/v1/chat/completions") || path.starts_with("/v1/embeddings") {
         Protocol::Chat
     } else if path.starts_with("/v1/responses") {
         Protocol::Responses
@@ -592,10 +592,15 @@ async fn handle(shared: Arc<Shared>, req: Request<Incoming>) -> Response<GwBody>
         rid: rid.clone(),
         inbound,
         rec: rec.clone(),
+        endpoint: if parts.uri.path() == "/v1/embeddings" {
+            Endpoint::Embeddings
+        } else {
+            Endpoint::Generate
+        },
     };
     let path = parts.uri.path().to_owned();
     let resp = match (parts.method.as_str(), path.as_str()) {
-        ("POST", "/v1/messages" | "/v1/chat/completions" | "/v1/responses") => {
+        ("POST", "/v1/messages" | "/v1/chat/completions" | "/v1/responses" | "/v1/embeddings") => {
             generate::generate(route, parts, body).await
         }
         ("POST", "/v1/messages/count_tokens") => anthropic::count_tokens(route, parts, body).await,
@@ -626,6 +631,17 @@ pub struct Route {
     pub inbound: Protocol,
     /// Accumulates the request-log record.
     pub rec: record::Recorder,
+    /// What the request asks for.
+    pub endpoint: Endpoint,
+}
+
+/// What a request to the generation handler asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endpoint {
+    /// A conversation: Messages, Chat Completions or Responses.
+    Generate,
+    /// Embeddings.
+    Embeddings,
 }
 
 impl Route {
