@@ -7,8 +7,8 @@
 use serde_json::{Map, Value as Json};
 
 use super::{
-    invalid, parse_object, want_array, want_bool, want_f64, want_object, want_str, want_u32,
-    InboundCtx,
+    invalid, parse_object, unhandled, want_array, want_bool, want_f64, want_object, want_str,
+    want_u32, InboundCtx,
 };
 use crate::ir::{
     DocumentSource, Effort, ImageSource, IrRequest, Part, Protocol, Reasoning, ReasoningDisplay,
@@ -102,7 +102,7 @@ impl Parser<'_> {
                     self.cache_control(value, "cache_control")?;
                 }
                 other => {
-                    unreachable!("table says `{other}` is translated but the parser has no case")
+                    unhandled!("table says `{other}` is translated but the parser has no case")
                 }
             }
         }
@@ -183,7 +183,7 @@ impl Parser<'_> {
                     "output_config" => {
                         effort = self.output_config(v, &format!("{path}.output_config"))?.0;
                     }
-                    other => unreachable!("table says message key `{other}` is translated"),
+                    other => unhandled!("table says message key `{other}` is translated"),
                 }
             }
             let role = role.ok_or_else(|| invalid(format!("{path}.role"), "`role` is required"))?;
@@ -317,6 +317,17 @@ impl Parser<'_> {
                 self.image_source(need("source")?, &format!("{path}.source"))?,
             )]),
             "document" => self.document(need("source")?, &format!("{path}.source")),
+            "compaction" => {
+                // A block that carries `null` marks a failed compaction and is a no-op.
+                match get("content") {
+                    Some(Json::String(s)) if !s.is_empty() => Ok(vec![Part::Text(s.clone())]),
+                    Some(Json::String(_)) => Err(invalid(
+                        format!("{path}.content"),
+                        "a compaction block's `content` may not be an empty string",
+                    )),
+                    _ => Ok(Vec::new()),
+                }
+            }
             "search_result" => {
                 let source = want_str(need("source")?, &format!("{path}.source"))?;
                 let title = want_str(need("title")?, &format!("{path}.title"))?;
@@ -351,7 +362,7 @@ impl Parser<'_> {
                 Ok(vec![Part::Text(format!("Tool: {name}"))])
             }
             other => {
-                unreachable!("table says block `{other}` is translated but the parser has no case")
+                unhandled!("table says block `{other}` is translated but the parser has no case")
             }
         }
     }
@@ -607,7 +618,7 @@ impl Parser<'_> {
                     "strict" => strict = Some(want_bool(v, &kp)?),
                     "input_examples" => examples.extend(want_array(v, &kp)?),
                     "cache_control" => self.cache_control(v, &kp)?,
-                    other => unreachable!("table says tool field `{other}` is translated"),
+                    other => unhandled!("table says tool field `{other}` is translated"),
                 }
             }
             let name = name.ok_or_else(|| invalid(format!("{path}.name"), "`name` is required"))?;
@@ -647,7 +658,7 @@ impl Parser<'_> {
                 "type" => kind = Some(want_str(v, &kp)?),
                 "name" => name = Some(want_str(v, &kp)?.to_owned()),
                 "disable_parallel_tool_use" => parallel = !want_bool(v, &kp)?,
-                other => unreachable!("table says tool_choice field `{other}` is translated"),
+                other => unhandled!("table says tool_choice field `{other}` is translated"),
             }
         }
         let kind = match kind {
@@ -701,7 +712,7 @@ impl Parser<'_> {
                         };
                     }
                 }
-                other => unreachable!("table says thinking field `{other}` is translated"),
+                other => unhandled!("table says thinking field `{other}` is translated"),
             }
         }
         let mode = match ty {
@@ -764,7 +775,7 @@ impl Parser<'_> {
                         }
                     }
                 }
-                other => unreachable!("table says output_config key `{other}` is translated"),
+                other => unhandled!("table says output_config key `{other}` is translated"),
             }
         }
         Ok((effort, format))
@@ -1506,5 +1517,37 @@ mod tests {
             {"role": "user", "content": "q"}]})));
         assert!(p.ignored.iter().any(|i| i.name == "redacted_thinking"));
         assert!(matches!(&p.value.turns[0], Turn::Assistant(parts) if parts.len() == 1));
+    }
+
+    #[test]
+    fn compaction_summaries_are_kept_as_text_and_failed_ones_are_no_ops() {
+        let body = |block: Json| {
+            json!({"model": "m", "max_tokens": 5, "messages": [
+                {"role": "assistant", "content": [block, {"type": "text", "text": "after"}]},
+                {"role": "user", "content": "go on"}]})
+        };
+        let parse = |v: Json| parse_request(v.to_string().as_bytes(), &InboundCtx::default());
+        let ok = parse(body(json!({"type": "compaction", "content": "the summary", "encrypted_content": "xyz", "signature": "s", "tool_changes": []}))).unwrap();
+        let Turn::Assistant(parts) = &ok.value.turns[0] else {
+            panic!("{:?}", ok.value.turns)
+        };
+        assert_eq!(parts[0], Part::Text("the summary".into()));
+        let names: Vec<&str> = ok.ignored.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            names.contains(&"compaction.encrypted_content")
+                && names.contains(&"compaction.tool_changes"),
+            "{names:?}"
+        );
+        let failed = parse(body(json!({"type": "compaction", "content": null}))).unwrap();
+        let Turn::Assistant(parts) = &failed.value.turns[0] else {
+            panic!()
+        };
+        assert_eq!(parts, &vec![Part::Text("after".into())]);
+        assert_eq!(
+            parse(body(json!({"type": "compaction", "content": ""})))
+                .unwrap_err()
+                .field,
+            "messages[0].content[0].content"
+        );
     }
 }

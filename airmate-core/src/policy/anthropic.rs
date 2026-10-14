@@ -16,6 +16,7 @@ use super::{
 const SERVER_TOOLS: &str = "server tools have no upstream equivalent";
 const SERVER_CODE: &str = "server-side code execution has no upstream equivalent";
 const NO_EQUIVALENT: &str = "no upstream equivalent";
+const MCP: &str = "the MCP connector has no upstream equivalent";
 const HISTORY_WHOLE: &str =
     "the client's history is sent whole; an overflow returns `prompt is too long`";
 
@@ -86,7 +87,20 @@ pub const TABLE: &[Entry] = &[
     entry(ContentBlock, "text_editor_code_execution_tool_result", Rejected, SERVER_TOOLS),
     entry(ContentBlock, "tool_search_tool_result", Rejected, SERVER_TOOLS),
     entry(ContentBlock, "container_upload", Rejected, SERVER_CODE),
+    entry(ContentBlock, "advisor_tool_result", Rejected, SERVER_TOOLS),
+    entry(ContentBlock, "mcp_tool_use", Rejected, MCP),
+    entry(ContentBlock, "mcp_tool_result", Rejected, MCP),
+    entry(ContentBlock, "mcp_tool_listing", Rejected, MCP),
+    entry(ContentBlock, "compaction", Translated, "the summary becomes text, so the context it carries is not lost"),
+    entry(ContentBlock, "fallback", Ignored, "marks a fallback hop inside Anthropic's service; not part of the prompt"),
+    entry(ContentBlock, "tool_addition", Ignored, "every tool is sent eagerly"),
+    entry(ContentBlock, "tool_removal", Ignored, "every tool is sent eagerly"),
     // Content block fields, `<type>.<key>`
+    entry(BlockField, "compaction.content", Translated, "the summary of the compacted context; `null` (a failed compaction) is a no-op"),
+    entry(BlockField, "compaction.cache_control", Translated, "contributes to `prompt_cache_key`"),
+    entry(BlockField, "compaction.encrypted_content", Ignored, "opaque to every upstream"),
+    entry(BlockField, "compaction.signature", Ignored, "opaque to every upstream"),
+    entry(BlockField, "compaction.tool_changes", Ignored, "every tool is sent eagerly"),
     entry(BlockField, "text.text", Translated, "the text"),
     entry(BlockField, "text.cache_control", Translated, "contributes to `prompt_cache_key`"),
     entry(BlockField, "text.citations", Ignored, "upstreams return no citations"),
@@ -144,6 +158,7 @@ pub const TABLE: &[Entry] = &[
     entry(StopReason, "stop_sequence", Ignored, "upstreams do not say which sequence matched; reported as `end_turn`"),
     entry(StopReason, "tool_use", Translated, "`finish_reason: tool_calls`"),
     entry(StopReason, "pause_turn", Ignored, "only server tools pause"),
+    entry(StopReason, "compaction", Ignored, "only Anthropic's own service compacts"),
     entry(StopReason, "refusal", Translated, "`content_filter` or an upstream `refusal`"),
     entry(StopReason, "model_context_window_exceeded", Ignored, "upstreams return an error, answered as `prompt is too long`"),
     // Stream deltas
@@ -152,6 +167,7 @@ pub const TABLE: &[Entry] = &[
     entry(StreamDelta, "thinking_delta", Translated, "reasoning text"),
     entry(StreamDelta, "signature_delta", Translated, "the gateway's signature"),
     entry(StreamDelta, "citations_delta", Ignored, "upstreams return no citations"),
+    entry(StreamDelta, "compaction_delta", Ignored, "only Anthropic's own service compacts"),
 ];
 
 #[cfg(test)]
