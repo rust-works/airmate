@@ -1,0 +1,67 @@
+# The built-in capability catalog: what each family of model can do, as of the `as_of` date.
+#
+# Entries match upstream model names by glob, first match wins. Values are indicative and meant
+# to be overridden in the configuration (`catalog:`) when an operator knows better; a model with
+# no entry is assumed to support everything and to have an unbounded window.
+#
+# No prices are shipped: a request whose model has no price is counted with cost "unknown", never
+# zero. Set `price` on a target or in `catalog:`.
+as_of: "2026-10-14"
+entries:
+  - match: "gpt-5*"
+    context_window: 400000
+    max_output_tokens: 128000
+    vision: true
+    documents: false
+    thinking: true
+    effort: true
+  - match: "gpt-4.1*"
+    context_window: 1047576
+    max_output_tokens: 32768
+    vision: true
+    thinking: false
+    effort: false
+  - match: "gpt-4o*"
+    context_window: 128000
+    max_output_tokens: 16384
+    vision: true
+    thinking: false
+    effort: false
+  - match: "o1*"
+    context_window: 200000
+    max_output_tokens: 100000
+    vision: true
+    thinking: true
+    effort: true
+  - match: "o3*"
+    context_window: 200000
+    max_output_tokens: 100000
+    vision: true
+    thinking: true
+    effort: true
+  - match: "o4*"
+    context_window: 200000
+    max_output_tokens: 100000
+    vision: true
+    thinking: true
+    effort: true
+  - match: "claude-*"
+    context_window: 200000
+    vision: true
+    documents: true
+    thinking: true
+    effort: true
+  - match: "gemini-3*"
+    context_window: 1048576
+    max_output_tokens: 65536
+    vision: true
+    documents: true
+    thinking: true
+    effort: true
+  - match: "gemini-2.5*"
+    context_window: 1048576
+    max_output_tokens: 65536
+    vision: true
+    documents: true
+    thinking: true
+    effort: true

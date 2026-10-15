@@ -1,0 +1,12 @@
+data: {"id":"c3","model":"qwq","choices":[{"index":0,"delta":{"role":"assistant","content":"<thi"},"finish_reason":null}]}
+
+data: {"id":"c3","model":"qwq","choices":[{"index":0,"delta":{"content":"nk>Let me "},"finish_reason":null}]}
+
+data: {"id":"c3","model":"qwq","choices":[{"index":0,"delta":{"content":"work it out.</th"},"finish_reason":null}]}
+
+data: {"id":"c3","model":"qwq","choices":[{"index":0,"delta":{"content":"ink>\n\nThe answer is 4."},"finish_reason":null}]}
+
+data: {"id":"c3","model":"qwq","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":11}}
+
+data: [DONE]
+

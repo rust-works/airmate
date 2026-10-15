@@ -1,0 +1,56 @@
+name: Report drift
+description: Open or update the labelled issue for a drift check, and close it when the check is clean.
+inputs:
+  label:
+    description: The label that identifies this check's issue.
+    required: true
+  title:
+    description: The issue title.
+    required: true
+  report:
+    description: Path to the Markdown report the check printed.
+    required: true
+  status:
+    description: The check's exit status - 0 clean, 1 drift, anything else a failed comparison.
+    required: true
+  token:
+    description: A token that may write issues.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        LABEL: ${{ inputs.label }}
+        TITLE: ${{ inputs.title }}
+        REPORT: ${{ inputs.report }}
+        STATUS: ${{ inputs.status }}
+      run: |
+        set -euo pipefail
+        gh label create "$LABEL" --color BFD4F2 --description "Scheduled drift check" 2>/dev/null || true
+        existing=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+        body=$(mktemp)
+        if [ "$STATUS" = "0" ]; then
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "The check is clean again."
+            gh issue close "$existing"
+          fi
+          exit 0
+        fi
+        {
+          if [ "$STATUS" = "1" ]; then
+            echo "The weekly check found drift. Add the fields below to the policy table, classed translated, ignored or rejected, with a test."
+          else
+            echo "The weekly check could not compare. A changed file layout is reported like this rather than as 'no drift': the parser needs updating."
+          fi
+          echo
+          cat "$REPORT"
+          echo
+          echo "_Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}_"
+        } > "$body"
+        if [ -n "$existing" ]; then
+          gh issue edit "$existing" --body-file "$body"
+        else
+          gh issue create --title "$TITLE" --label "$LABEL" --body-file "$body"
+        fi

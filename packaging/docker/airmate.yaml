@@ -1,0 +1,9 @@
+# The configuration baked into the container image. Mount your own over /etc/airmate/airmate.yaml,
+# or configure a single upstream with AIRMATE_UPSTREAM_URL and AIRMATE_API_KEY.
+server:
+  # Inside the container the gateway has to listen on every interface for a published port to
+  # reach it. Publish the port on loopback (`-p 127.0.0.1:9997:9997`) to keep it local.
+  bind: 0.0.0.0
+  port: 9997
+  insecure_remote: true
+  allowed_hosts: ["localhost:9997", "127.0.0.1:9997"]

@@ -68,6 +68,12 @@ jobs:
       if: matrix.build != 'win-msvc'
       run: strip "target/${{ matrix.target }}/release/airmate"
 
+    # The Linux binaries link glibc dynamically, so the newest glibc symbol they use is the
+    # oldest host they run on. ubuntu-22.04 ships glibc 2.35; fail if a build needs more.
+    - name: Check the glibc floor
+      if: startsWith(matrix.build, 'linux')
+      run: ./scripts/check-glibc-floor.sh "target/${{ matrix.target }}/release/airmate" 2.35
+
     - name: Build archive
       shell: bash
       run: |
@@ -83,6 +89,16 @@ jobs:
           tar czf "${{ matrix.archive-name }}" ./*
         fi
 
+    - name: Checksum the archive
+      shell: bash
+      working-directory: archive
+      run: |
+        if command -v sha256sum >/dev/null; then
+          sha256sum "${{ matrix.archive-name }}" > "${{ matrix.archive-name }}.sha256"
+        else
+          shasum -a 256 "${{ matrix.archive-name }}" > "${{ matrix.archive-name }}.sha256"
+        fi
+
     - name: Upload release archive
       shell: bash
       env:
@@ -90,7 +106,59 @@ jobs:
       run: |
         gh release upload "$GITHUB_REF_NAME" \
           "archive/${{ matrix.archive-name }}" \
+          "archive/${{ matrix.archive-name }}.sha256" \
           --repo "$GITHUB_REPOSITORY"
+
+  # Fills the Homebrew formula template with the release's version and checksums and attaches it
+  # to the release. Copy `airmate.rb` into the tap.
+  homebrew-formula:
+    name: Homebrew formula
+    runs-on: ubuntu-latest
+    needs: build-release
+    steps:
+    - uses: actions/checkout@v7
+    - name: Render the formula
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        mkdir dist
+        gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist --pattern '*.sha256'
+        sha() { cut -d' ' -f1 "dist/$1.sha256"; }
+        sed -e "s/@VERSION@/$version/g" \
+            -e "s/@SHA_MACOS_ARM64@/$(sha airmate-macos-arm64.tar.gz)/" \
+            -e "s/@SHA_LINUX@/$(sha airmate-linux.tar.gz)/" \
+            -e "s/@SHA_LINUX_ARM64@/$(sha airmate-linux-arm64.tar.gz)/" \
+            packaging/homebrew/airmate.rb.template > airmate.rb
+        ! grep -q '@' airmate.rb
+        gh release upload "$GITHUB_REF_NAME" airmate.rb --repo "$GITHUB_REPOSITORY" --clobber
+
+  # The container image, on GitHub's registry under the repository's own name.
+  publish-container:
+    name: Publish container image
+    runs-on: ubuntu-latest
+    needs: create-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v7
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Work out the tags
+      id: tags
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        image="ghcr.io/${GITHUB_REPOSITORY,,}"
+        echo "list=$image:$version,$image:latest" >> "$GITHUB_OUTPUT"
+    - uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.tags.outputs.list }}
 
   publish-crates:
     name: Publish to crates.io
@@ -99,7 +167,13 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
-    - name: Publish
+    # airmate depends on airmate-core by version, so the core goes first; `cargo publish` waits
+    # until the registry index has it before returning.
+    - name: Publish airmate-core
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      run: cargo publish
+      run: cargo publish -p airmate-core
+    - name: Publish airmate
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      run: cargo publish -p airmate

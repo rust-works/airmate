@@ -1,0 +1,6 @@
+# Check out every text file with LF, including on Windows: the generated documentation tables and
+# the shell scripts are compared byte for byte.
+* text=auto eol=lf
+# The golden stream fixtures and fuzz seeds carry their own line endings (some are CRLF on purpose).
+*.sse -text
+*.bin binary

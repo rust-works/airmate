@@ -1,19 +1,23 @@
-//! airmate: a tool for routing AI requests.
+//! airmate: a local, default-closed AI router.
 //!
-//! This is a placeholder. The binary currently prints a greeting and nothing else.
+//! A client speaks one protocol (the Anthropic Messages API, the OpenAI Chat Completions API or
+//! the OpenAI Responses API) to airmate, which translates the request, picks an upstream model,
+//! calls it, and translates the answer back, streaming included.
 
-/// The line the `airmate` binary prints.
-#[must_use]
-pub fn greeting() -> &'static str {
-    "Hello, world!"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greeting_is_hello_world() {
-        assert_eq!(greeting(), "Hello, world!");
-    }
-}
+pub mod admin;
+pub mod auth;
+pub mod bodylog;
+pub mod cli;
+pub mod config;
+pub mod doctor;
+pub mod keychain;
+pub mod metrics;
+pub mod obs;
+#[cfg(feature = "otel")]
+pub mod otel;
+pub mod router;
+pub mod secret;
+pub mod server;
+pub mod service;
+pub mod sys;
+pub mod usage;

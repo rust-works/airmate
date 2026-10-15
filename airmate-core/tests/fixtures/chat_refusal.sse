@@ -1,0 +1,8 @@
+data: {"id":"c5","model":"gpt-4.1","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can't "},"finish_reason":null}]}
+
+data: {"id":"c5","model":"gpt-4.1","choices":[{"index":0,"delta":{"refusal":"help with that."},"finish_reason":null}]}
+
+data: {"id":"c5","model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":7}}
+
+data: [DONE]
+

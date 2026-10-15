@@ -1,0 +1,8 @@
+data: {"id":"c8","model":"fw","choices":[{"index":0,"delta":{"role":"assistant","content":"Done."},"finish_reason":null}]}
+
+data: {"id":"c8","model":"fw","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: {"id":"c8","model":"fw","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":64,"prompt_tokens_details":{"cached_tokens":60}}}
+
+data: [DONE]
+

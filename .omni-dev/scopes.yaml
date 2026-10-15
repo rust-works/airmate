@@ -2,12 +2,44 @@ scopes:
   - name: "ci"
     description: "CI/CD pipelines and GitHub Actions workflows"
     examples: ["ci: add coverage job", "ci: fix release pipeline"]
-    file_patterns: [".github/**"]
+    file_patterns: [".github/**", "tools/**", "fuzz/**", "scripts/**"]
   - name: "cli"
     description: "Command-line interface and argument parsing"
     examples: ["cli: add serve subcommand", "cli: improve help text"]
-    file_patterns: ["src/main.rs", "src/cli.rs", "src/cli/**"]
+    file_patterns: ["src/main.rs", "src/cli.rs", "src/cli/**", "src/doctor.rs"]
   - name: "docs"
     description: "Documentation"
     examples: ["docs: expand the README"]
     file_patterns: ["README.md", "CONTRIBUTING.md", "CHANGELOG.md", "docs/**"]
+  - name: "deps"
+    description: "Dependencies and workspace layout"
+    examples: ["deps: add hyper", "deps: split out airmate-core"]
+    file_patterns: ["Cargo.toml", "Cargo.lock", "*/Cargo.toml", "*/*/Cargo.toml", "deny.toml"]
+  - name: "core"
+    description: "The sans-I/O translation core: IR, adapters, field policy, streams"
+    examples: ["core: add the Anthropic inbound parser", "core: add the stream sequencer"]
+    file_patterns: ["airmate-core/**"]
+  - name: "config"
+    description: "Configuration file, environment and flag precedence"
+    examples: ["config: add the YAML schema", "config: add profiles"]
+    file_patterns: ["src/config.rs", "src/config/**"]
+  - name: "server"
+    description: "HTTP server, upstream client and request handling"
+    examples: ["server: add the request guard", "server: stream upstream replies"]
+    file_patterns: ["src/server.rs", "src/server/**", "src/upstream.rs", "src/upstream/**"]
+  - name: "router"
+    description: "Routing, failover, circuit breaking, limits and strategies"
+    examples: ["router: add the circuit breaker", "router: add weighted selection"]
+    file_patterns: ["src/router.rs", "src/router/**"]
+  - name: "security"
+    description: "Secrets, tokens, client keys and the request guard"
+    examples: ["security: add the Secret type", "security: add client keys"]
+    file_patterns: ["src/secret.rs", "src/secret/**", "src/auth.rs", "src/auth/**", "SECURITY.md"]
+  - name: "obs"
+    description: "Request log, usage ledger, metrics, status and admin socket"
+    examples: ["obs: add the request log", "obs: add Prometheus metrics"]
+    file_patterns: ["src/obs.rs", "src/log.rs", "src/log/**", "src/usage.rs", "src/usage/**", "src/metrics.rs", "src/otel.rs", "src/bodylog.rs", "src/admin.rs", "src/admin/**"]
+  - name: "service"
+    description: "Service management, shutdown and packaging"
+    examples: ["service: generate a launchd agent", "service: add graceful shutdown"]
+    file_patterns: ["src/service.rs", "src/service/**", "src/sys.rs", "packaging/**", "Dockerfile"]

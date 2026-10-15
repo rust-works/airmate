@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "airmate-core", "tools/drift"]
+
 [package]
 name = "airmate"
 version = "0.1.0"
@@ -11,5 +14,57 @@ readme = "README.md"
 keywords = ["ai", "llm", "router", "gateway", "anthropic"]
 categories = ["command-line-utilities"]
 rust-version = "1.88.0"
+# Packaging and repository plumbing stay out of the crates.io tarball.
+exclude = [".github/", ".omni-dev/", "packaging/", "Dockerfile", ".dockerignore"]
 
 [dependencies]
+# The sans-I/O translation core.
+airmate-core = { path = "airmate-core", version = "0.1.0" }
+# Base64url for generated tokens and keys.
+base64 = "0.23.1"
+# Byte buffers for request and response bodies.
+bytes = "1.12.1"
+# Command-line parsing (derive), with a minimal feature set.
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+# Shell completions, behind the `completions` feature.
+clap_complete = { version = "4.6.11", optional = true }
+# The OS CSPRNG for tokens and keys.
+getrandom = "0.4.3"
+# The Body trait for the streaming response body.
+http-body = "1.1.0"
+# Body helpers: collecting, limiting and boxing.
+http-body-util = "0.1.5"
+# HTTP/1 server and client (no framework; the router is in-tree).
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server", "client"] }
+# HTTPS for upstream calls, with rustls and webpki roots (never OpenSSL).
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
+# The pooled HTTP client and tokio glue for hyper.
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "server", "server-graceful", "client-legacy", "http1"] }
+# TLS for upstream calls (ring provider; no OpenSSL, no native-tls).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+# Derive (de)serialisation for the configuration schema.
+serde = { version = "1.0.229", features = ["derive"] }
+# JSON for the request log, `config show` and admin output.
+serde_json = "1.0.154"
+# YAML configuration (a maintained serde_yaml fork; serde_yaml itself is archived).
+serde_norway = "0.9.42"
+# SHA-256 for client key hashes and constant-time token comparison.
+sha2 = "0.11.1"
+# TLS for the listener (`tls` feature); already pulled in by hyper-rustls.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"], optional = true }
+# Async runtime with a minimal feature set (not `full`).
+tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "io-util", "fs"] }
+# `setrlimit` and file-descriptor handling on Unix; already in the tree through tokio.
+libc = "0.2.190"
+# Zero secrets on drop.
+zeroize = { version = "1.9.1", features = ["derive"] }
+
+[features]
+default = ["completions", "tls", "otel"]
+# `otel:` exports one trace span per request as OTLP/HTTP JSON. It needs no extra crate: the spans
+# are built by hand and sent with the HTTP client the gateway already has.
+otel = []
+# `server.tls`: serve HTTPS. rustls and tokio-rustls are already in the tree for upstream calls.
+tls = ["dep:tokio-rustls"]
+# `airmate completions <shell>`.
+completions = ["dep:clap_complete"]

@@ -1,0 +1,40 @@
+name: perf-budget
+
+# The performance budget: translating and routing a 50 KB request under 1 ms at p99, an idle
+# connection under 64 KiB, and flat allocation across a long stream. The previous run's numbers are
+# kept in the cache; a metric more than 20 % worse than its baseline fails the job.
+
+on:
+  schedule:
+    - cron: '47 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    name: Performance budget
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Restore the baseline
+      uses: actions/cache/restore@v4
+      with:
+        path: perf-baseline.json
+        key: perf-baseline-${{ github.run_id }}
+        restore-keys: perf-baseline-
+    - name: Measure
+      env:
+        AIRMATE_PERF_BASELINE: perf-baseline.json
+        AIRMATE_PERF_WRITE: perf-current.json
+      run: cargo test --release --test perf -- --ignored --nocapture
+    - name: Keep the numbers
+      run: mv perf-current.json perf-baseline.json
+    - name: Save the baseline
+      uses: actions/cache/save@v4
+      with:
+        path: perf-baseline.json
+        key: perf-baseline-${{ github.run_id }}
