@@ -253,4 +253,154 @@ mod tests {
         let e = call(Path::new("/definitely/not/there.sock"), "GET", "/status").unwrap_err();
         assert!(e.message.contains("not running"), "{}", e.message);
     }
+
+    /// Serves one canned reply per connection on a Unix socket, then stops.
+    #[cfg(unix)]
+    fn stub(socket: &Path, replies: Vec<(u16, String)>) -> std::thread::JoinHandle<()> {
+        use std::io::Read;
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(socket);
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            for (code, body) in replies {
+                let (mut c, _) = listener.accept().unwrap();
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 512];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = c.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                let reply = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                c.write_all(reply.as_bytes()).unwrap();
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    fn socket(name: &str) -> std::path::PathBuf {
+        // Short: socket paths are limited to about a hundred bytes.
+        std::path::PathBuf::from(format!("/tmp/am-adm-{}-{name}/s.sock", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn process_with(socket: &Path) -> Process {
+        // `admin_socket` is the file name under the state directory's `run` folder.
+        let state = socket.parent().unwrap().to_str().unwrap().to_owned();
+        Process {
+            env: Box::new(move |k| match k {
+                "XDG_STATE_HOME" | "HOME" | "XDG_CONFIG_HOME" => Some(state.clone()),
+                _ => None,
+            }),
+            platform: crate::config::paths::Platform::current(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_tells_the_operator_what_needs_attention_or_why_it_was_refused() {
+        let sock = socket("reload");
+        let t = stub(
+            &sock,
+            vec![
+                (
+                    200,
+                    r#"{"warnings":["w1"],"restart_required":["server.port"]}"#.into(),
+                ),
+                (200, "not json".into()),
+                (400, r#"{"error":"bad yaml"}"#.into()),
+                (500, "plain failure".into()),
+            ],
+        );
+        let msg = reload_running(&sock).unwrap();
+        assert!(msg.starts_with("reloaded the running gateway"), "{msg}");
+        assert!(msg.contains("\nwarning: w1"), "{msg}");
+        assert!(
+            msg.contains("\nwarning: server.port changed but only takes effect after a restart"),
+            "{msg}"
+        );
+        assert_eq!(
+            reload_running(&sock).unwrap(),
+            "reloaded the running gateway",
+            "an unreadable body still means success on a 200"
+        );
+        let e = reload_running(&sock).unwrap_err();
+        assert!(e.message.contains("bad yaml"), "{}", e.message);
+        let e = reload_running(&sock).unwrap_err();
+        assert!(e.message.contains("plain failure"), "{}", e.message);
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(sock.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_exits_unhealthy_when_the_gateway_says_so_and_explains_odd_answers() {
+        let p_dir = socket("status");
+        // The state directory is this folder, so the admin socket is under it: ask where.
+        let p = process_with(&p_dir);
+        let sock = p.dirs().admin_socket();
+        let t = stub(
+            &sock,
+            vec![
+                (503, "down for maintenance".into()),
+                (200, "{broken".into()),
+                (200, r#"{"ok":true,"version":"1"}"#.into()),
+                (200, r#"{"ok":false,"version":"1"}"#.into()),
+            ],
+        );
+        let e = status(&p, Format::Text, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("answered 503"), "{}", e.message);
+        let e = status(&p, Format::Text, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("unreadable status"), "{}", e.message);
+
+        let mut out = Vec::new();
+        status(&p, Format::Json, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("\"ok\": true"));
+
+        let mut out = Vec::new();
+        let e = status(&p, Format::Text, &mut out).unwrap_err();
+        assert_eq!(e.code, EXIT_UNHEALTHY);
+        assert!(e.message.starts_with("unhealthy"), "{}", e.message);
+        assert!(String::from_utf8(out).unwrap().contains("airmate 1"));
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(p_dir.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_output_is_reported_not_swallowed() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let p_dir = socket("closed");
+        let p = process_with(&p_dir);
+        let sock = p.dirs().admin_socket();
+        let t = stub(
+            &sock,
+            vec![
+                (200, r#"{"warnings":[],"restart_required":[]}"#.into()),
+                (200, r#"{"ok":true}"#.into()),
+                (200, r#"{"ok":true}"#.into()),
+            ],
+        );
+        let e = reload(&p, &mut Closed).unwrap_err();
+        assert!(e.message.contains("cannot write output"), "{}", e.message);
+        let e = status(&p, Format::Json, &mut Closed).unwrap_err();
+        assert!(e.message.contains("cannot write output"), "{}", e.message);
+        let e = status(&p, Format::Text, &mut Closed).unwrap_err();
+        assert!(e.message.contains("cannot write output"), "{}", e.message);
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(p_dir.parent().unwrap());
+    }
 }

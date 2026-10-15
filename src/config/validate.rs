@@ -930,4 +930,95 @@ mod tests {
         assert_eq!(ConfigError::new("a.b", "bad").to_string(), "a.b: bad");
         assert_eq!(ConfigError::new("", "bad").to_string(), "bad");
     }
+
+    /// A configuration from YAML, over the defaults, to reach branches that are awkward to build
+    /// field by field.
+    fn yaml(text: &str) -> Config {
+        serde_norway::from_str(text).expect("the YAML parses; only validation should object")
+    }
+
+    #[test]
+    fn otel_needs_a_url_a_flush_interval_a_name_and_valid_header_names() {
+        let ok = yaml("otel: { endpoint: \"http://127.0.0.1:4318\" }\n");
+        assert!(validate(&ok).is_empty(), "{:?}", problems(&ok));
+        let c = yaml(
+            "otel:\n  endpoint: collector:4318\n  service_name: \"\"\n  flush_secs: 0\n  headers: { \"bad header\": { env: K } }\n",
+        );
+        assert!(has(&c, "otel.endpoint"), "{:?}", problems(&c));
+        assert!(has(&c, "otel.flush_secs"));
+        assert!(has(&c, "otel.service_name"));
+        assert!(has(&c, "is not a valid header name"));
+    }
+
+    #[test]
+    fn zero_limits_and_unsupported_options_are_rejected() {
+        let mut c = good();
+        c.server.keepalive_secs = 0;
+        assert!(has(&c, "server.keepalive_secs"));
+
+        let mut c = good();
+        c.upstreams[0].proxy = Some("http://proxy:3128".into());
+        assert!(has(&c, "upstream proxies are not supported"));
+
+        let mut c = good();
+        c.log.rotate = Some(Rotate {
+            max_size_mb: 0,
+            keep: 5,
+        });
+        assert!(has(&c, "log.rotate"));
+        c.log.rotate = Some(Rotate {
+            max_size_mb: 64,
+            keep: 0,
+        });
+        assert!(has(&c, "log.rotate"));
+    }
+
+    #[test]
+    fn classifiers_need_unique_names_a_url_and_a_timeout_and_rules_may_only_use_them() {
+        let c = yaml(
+            "classifiers:\n  - { name: c, url: \"http://127.0.0.1:1\", timeout_ms: 0 }\n  - { name: c, url: \"ftp://x\" }\n",
+        );
+        assert!(has(&c, "classifier names must be unique"));
+        assert!(has(&c, "classifiers[c].url"), "{:?}", problems(&c));
+        assert!(has(&c, "classifiers[c].timeout_ms"));
+
+        let mut c = good();
+        c.rules = yaml(
+            "rules:\n  - name: r\n    when: { classifier: { name: nope, label: l } }\n    use: \"*\"\n",
+        )
+        .rules;
+        assert!(has(&c, "`nope` is not a configured classifier"));
+    }
+
+    #[test]
+    fn catalog_overrides_and_the_breaker_are_range_checked() {
+        let c = yaml(
+            "catalog:\n  - { match: \"\" }\n  - { match: m, context_window: 0 }\n  - { match: n, max_output_tokens: 0 }\n",
+        );
+        assert!(has(&c, "catalog[0].match"), "{:?}", problems(&c));
+        assert!(has(&c, "catalog[1]") && has(&c, "catalog[2]"));
+        assert!(has(
+            &c,
+            "context_window and max_output_tokens must be at least 1"
+        ));
+
+        let mut c = good();
+        c.circuit.failure_threshold = 0;
+        assert!(has(&c, "circuit.failure_threshold"));
+        let mut c = good();
+        c.circuit.window = 0;
+        assert!(has(&c, "circuit.window"));
+        let mut c = good();
+        c.circuit.min_samples = c.circuit.window + 1;
+        assert!(has(&c, "circuit.window"));
+        let mut c = good();
+        c.circuit.error_rate = 1.5;
+        assert!(has(&c, "circuit.error_rate"));
+        let mut c = good();
+        c.circuit.max_cooldown_secs = c.circuit.cooldown_secs - 1;
+        assert!(has(&c, "circuit.max_cooldown_secs"));
+        let mut c = good();
+        c.usage.prices = String::new();
+        assert!(has(&c, "usage.prices"));
+    }
 }

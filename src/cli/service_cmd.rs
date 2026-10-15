@@ -413,3 +413,196 @@ pub fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("airmate-svc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn step(program: &str, args: &[&str], required: bool) -> service::Step {
+        service::Step {
+            program: program.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            required,
+        }
+    }
+
+    fn text(buf: Vec<u8>) -> String {
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn show_plan_lists_files_steps_and_removals() {
+        let plan = Plan {
+            files: vec![FileWrite {
+                path: "/x/a.plist".into(),
+                contents: "body".into(),
+            }],
+            steps: vec![step("launchctl", &["load", "a b"], true)],
+            remove: vec!["/x/old".into()],
+        };
+        let mut out = Vec::new();
+        show_plan(&plan, &mut out).unwrap();
+        let t = text(out);
+        assert!(t.contains("would write /x/a.plist:\nbody"), "{t}");
+        assert!(t.contains("would run: launchctl load \"a b\""), "{t}");
+        assert!(t.contains("would remove /x/old"), "{t}");
+    }
+
+    #[test]
+    fn carry_out_writes_files_runs_steps_and_removes() {
+        let d = dir("carry");
+        let gone = d.join("gone");
+        std::fs::write(&gone, "x").unwrap();
+        let plan = Plan {
+            files: vec![FileWrite {
+                path: d.join("nested/unit.service"),
+                contents: "unit".into(),
+            }],
+            steps: vec![step("true", &[], true)],
+            // The first is there, the second is not: a missing file is not an error.
+            remove: vec![gone.clone(), d.join("never-existed")],
+        };
+        let mut out = Vec::new();
+        carry_out(&plan, &mut out).unwrap();
+        let t = text(out);
+        assert_eq!(
+            std::fs::read_to_string(d.join("nested/unit.service")).unwrap(),
+            "unit"
+        );
+        assert!(t.contains("wrote ") && t.contains("removed "), "{t}");
+        assert!(!gone.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn carry_out_tolerates_optional_steps_and_stops_at_required_ones() {
+        let optional = Plan {
+            steps: vec![
+                step("false", &[], false),
+                step("airmate-no-such-program", &[], false),
+            ],
+            ..Plan::default()
+        };
+        carry_out(&optional, &mut Vec::new()).unwrap();
+
+        let fails = Plan {
+            steps: vec![step("false", &[], true)],
+            ..Plan::default()
+        };
+        let e = carry_out(&fails, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("`false` failed"), "{}", e.message);
+
+        let missing = Plan {
+            steps: vec![step("airmate-no-such-program", &[], true)],
+            ..Plan::default()
+        };
+        let e = carry_out(&missing, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot run"), "{}", e.message);
+    }
+
+    #[test]
+    fn carry_out_reports_files_it_cannot_write_or_remove() {
+        let d = dir("carry-err");
+        // A file where a directory is needed.
+        std::fs::write(d.join("file"), "x").unwrap();
+        let plan = Plan {
+            files: vec![FileWrite {
+                path: d.join("file/child"),
+                contents: String::new(),
+            }],
+            ..Plan::default()
+        };
+        let e = carry_out(&plan, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot create"), "{}", e.message);
+
+        // A directory where a file is wanted.
+        let plan = Plan {
+            files: vec![FileWrite {
+                path: d.clone(),
+                contents: String::new(),
+            }],
+            ..Plan::default()
+        };
+        let e = carry_out(&plan, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot write"), "{}", e.message);
+
+        // Removing a directory with `remove_file` fails other than by being absent.
+        let plan = Plan {
+            remove: vec![d.clone()],
+            ..Plan::default()
+        };
+        let e = carry_out(&plan, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot remove"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tail_file_shows_the_last_lines_and_explains_a_missing_log() {
+        let d = dir("tail");
+        let log = d.join("service.log");
+        let e = tail_file(&log, false, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("no service log"), "{}", e.message);
+
+        let body: String = (0..250).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&log, body).unwrap();
+        let mut out = Vec::new();
+        tail_file(&log, false, &mut out).unwrap();
+        let t = text(out);
+        assert_eq!(t.lines().count(), 200);
+        assert!(t.starts_with("line 50\n") && t.ends_with("line 249\n"));
+
+        // A directory is not a log.
+        let e = tail_file(&d, false, &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot read"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Records everything, then reports a closed pipe once the rotated log's line arrives.
+    struct Closing(Vec<u8>);
+
+    impl Write for Closing {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(b);
+            if b == b"n\n" {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn following_a_log_streams_new_output_and_survives_rotation() {
+        let d = dir("follow");
+        let log = d.join("service.log");
+        std::fs::write(&log, "first\n").unwrap();
+        let path = log.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"second\n").unwrap();
+            drop(f);
+            std::thread::sleep(Duration::from_millis(400));
+            // Rotation: the file is replaced by a shorter one.
+            std::fs::write(&path, "n\n").unwrap();
+        });
+        let mut out = Closing(Vec::new());
+        tail_file(&log, true, &mut out).unwrap();
+        writer.join().unwrap();
+        assert_eq!(text(out.0), "first\nsecond\nn\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

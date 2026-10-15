@@ -213,4 +213,172 @@ mod tests {
             "a record with no readable time cannot satisfy --since"
         );
     }
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("airmate-logs-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn line(client: &str, status: u16) -> String {
+        let r = rec(
+            client,
+            status,
+            "2026-10-14T10:00:00.000Z",
+            RecordKind::Request,
+        );
+        format!("{}\n", serde_json::to_string(&r).unwrap())
+    }
+
+    fn process(home: &Path) -> Process {
+        let home = home.to_str().unwrap().to_owned();
+        Process {
+            env: Box::new(move |k| match k {
+                "HOME" | "XDG_STATE_HOME" | "XDG_CONFIG_HOME" => Some(home.clone()),
+                _ => None,
+            }),
+            platform: crate::config::paths::Platform::current(),
+        }
+    }
+
+    fn options(follow: bool) -> Options<'static> {
+        Options {
+            filter: Filter::default(),
+            format: Format::Oneline,
+            follow,
+            tail: None,
+            since: None,
+        }
+    }
+
+    /// Takes `ok` lines and reports a closed pipe on the last, as `head` does.
+    struct Closing {
+        ok: usize,
+        got: String,
+    }
+
+    impl Write for Closing {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.got.push_str(&String::from_utf8_lossy(b));
+            if b.ends_with(b"\n") {
+                self.ok -= 1;
+                if self.ok == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn logs_explains_a_missing_or_unreadable_log_and_a_bad_since() {
+        let d = dir("errors");
+        let p = process(&d);
+        let e = logs(&p, options(false), &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("no request log at"), "{}", e.message);
+
+        let log = p.dirs().request_log();
+        std::fs::create_dir_all(&log).unwrap();
+        let e = logs(&p, options(false), &mut Vec::new()).unwrap_err();
+        assert!(e.message.contains("cannot read"), "{}", e.message);
+
+        let mut o = options(false);
+        o.since = Some("yesterday-ish");
+        let e = logs(&p, o, &mut Vec::new()).unwrap_err();
+        assert!(e.message.starts_with("--since:"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn logs_stops_quietly_when_the_reader_goes_away() {
+        let d = dir("closed");
+        let p = process(&d);
+        let log = p.dirs().request_log();
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, format!("{}{}", line("a", 200), line("b", 200))).unwrap();
+        let mut out = Closing {
+            ok: 1,
+            got: String::new(),
+        };
+        logs(&p, options(false), &mut out).unwrap();
+        assert_eq!(out.got.lines().count(), 1, "stopped at the closed pipe");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn following_waits_for_a_log_that_does_not_exist_yet() {
+        let d = dir("follow-new");
+        let p = process(&d);
+        let log = p.dirs().request_log();
+        let path = log.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, line("late", 200)).unwrap();
+        });
+        let mut out = Closing {
+            ok: 1,
+            got: String::new(),
+        };
+        let mut o = options(true);
+        o.filter.client = Some("late".into());
+        logs(&p, o, &mut out).unwrap();
+        writer.join().unwrap();
+        assert!(out.got.contains("late"), "{}", out.got);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn following_prints_new_matching_records_whole_and_survives_rotation() {
+        let d = dir("follow");
+        let log = d.join("requests.jsonl");
+        std::fs::write(&log, line("seen", 200)).unwrap();
+        let initial = std::fs::metadata(&log).unwrap().len();
+        let path = log.clone();
+        let writer = std::thread::spawn(move || {
+            let append = |text: &str| {
+                use std::io::Write as _;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                f.write_all(text.as_bytes()).unwrap();
+            };
+            std::thread::sleep(Duration::from_millis(500));
+            // Not wanted, not JSON, and half of a wanted record.
+            append(&line("other", 200));
+            append("this is not a record\n");
+            let wanted = line("want", 503);
+            let (a, b) = wanted.split_at(10);
+            append(a);
+            std::thread::sleep(Duration::from_millis(500));
+            append(b);
+            std::thread::sleep(Duration::from_millis(500));
+            // Rotation: a new, shorter file.
+            std::fs::write(&path, line("want", 404)).unwrap();
+        });
+        let mut out = Closing {
+            ok: 2,
+            got: String::new(),
+        };
+        let filter = Filter {
+            client: Some("want".into()),
+            ..Filter::default()
+        };
+        follow(&log, initial, &filter, Format::Json, &mut out);
+        writer.join().unwrap();
+        let records: Vec<RequestRecord> = out
+            .got
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let statuses: Vec<u16> = records.iter().map(|r| r.status).collect();
+        assert_eq!(statuses, [503, 404], "{}", out.got);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

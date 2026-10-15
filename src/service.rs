@@ -627,6 +627,59 @@ mod tests {
         );
     }
 
+    fn shown(p: &Plan) -> Vec<(String, bool)> {
+        p.steps.iter().map(|s| (s.display(), s.required)).collect()
+    }
+
+    #[test]
+    fn systemd_starts_and_restarts_what_install_enabled() {
+        let mut s = spec();
+        // Socket-activated: starting the socket is what makes the service available.
+        assert_eq!(
+            shown(&plan(Manager::Systemd, Action::Start, &s)),
+            [("systemctl --user start airmate.socket".to_owned(), true)]
+        );
+        assert_eq!(
+            shown(&plan(Manager::Systemd, Action::Restart, &s)),
+            [("systemctl --user restart airmate.service".to_owned(), true)]
+        );
+        // On its own, the service is the thing to start, and there is no socket to stop.
+        s.unix_socket = Some("/run/airmate.sock".into());
+        assert_eq!(
+            shown(&plan(Manager::Systemd, Action::Start, &s)),
+            [("systemctl --user start airmate.service".to_owned(), true)]
+        );
+        assert_eq!(
+            shown(&plan(Manager::Systemd, Action::Stop, &s)),
+            [("systemctl --user stop airmate.service".to_owned(), true)]
+        );
+        let u = plan(Manager::Systemd, Action::Uninstall, &s);
+        assert_eq!(u.remove.len(), 1, "only the service unit was written");
+    }
+
+    #[test]
+    fn the_windows_task_is_run_ended_and_deleted_by_name() {
+        let s = spec();
+        let step = |args: &str, required| (format!("schtasks {args} /TN {LABEL}"), required);
+        assert_eq!(
+            shown(&plan(Manager::Task, Action::Start, &s)),
+            [step("/Run", true)]
+        );
+        assert_eq!(
+            shown(&plan(Manager::Task, Action::Stop, &s)),
+            [step("/End", true)]
+        );
+        assert_eq!(
+            shown(&plan(Manager::Task, Action::Restart, &s)),
+            [step("/End", false), step("/Run", true)],
+            "ending a task that is not running is not a failure"
+        );
+        assert_eq!(
+            shown(&plan(Manager::Task, Action::Uninstall, &s)),
+            [step("/End", false), step("/Delete /F", true)]
+        );
+    }
+
     #[test]
     fn the_windows_task_runs_at_logon() {
         let mut s = spec();

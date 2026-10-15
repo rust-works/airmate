@@ -415,3 +415,126 @@ fn request_log(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::Config;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("airmate-serve-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn text(buf: Vec<u8>) -> String {
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// A path whose parent is a file, so nothing can be opened there.
+    fn unopenable(d: &std::path::Path) -> std::path::PathBuf {
+        std::fs::write(d.join("file"), "x").unwrap();
+        d.join("file/log.jsonl")
+    }
+
+    #[test]
+    fn the_request_log_is_skipped_when_off_and_when_it_cannot_be_opened() {
+        let d = dir("reqlog");
+        let mut config = Config::default();
+        config.log.requests = false;
+        let mut err = Vec::new();
+        let _ = request_log(&config, &d.join("requests.jsonl"), &mut err);
+        assert!(err.is_empty());
+        assert!(!d.join("requests.jsonl").exists());
+
+        config.log.requests = true;
+        let _ = request_log(&config, &unopenable(&d), &mut err);
+        assert!(
+            text(err).contains("cannot open the request log"),
+            "an unwritable log warns and the gateway serves anyway"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_body_log_warns_that_it_is_on_and_when_it_cannot_be_opened() {
+        let d = dir("bodies");
+        let mut config = Config::default();
+        let mut err = Vec::new();
+        let _ = body_log(&config, &d.join("bodies.jsonl"), &mut err);
+        assert!(err.is_empty(), "off by default, and silent");
+
+        config.log.bodies = true;
+        let _ = body_log(&config, &d.join("bodies.jsonl"), &mut err);
+        assert!(
+            text(std::mem::take(&mut err)).contains("body logging is on"),
+            "prompts are being written to disk, which the operator is told"
+        );
+        let _ = body_log(&config, &unopenable(&d), &mut err);
+        assert!(
+            text(err).contains("bodies are not logged"),
+            "an unopenable body log must not stop the gateway"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_usage_ledger_is_read_back_and_its_failures_are_reported() {
+        let d = dir("ledger");
+        let path = d.join("usage.jsonl");
+        let mut config = Config::default();
+        config.usage.ledger = false;
+        let mut err = Vec::new();
+        let (_, history) = usage_ledger(&config, &path, &mut err);
+        assert!(history.is_empty() && err.is_empty());
+
+        // Budgets without a ledger forget their spend on restart: say so.
+        let with_budget = crate::config::load::parse(
+            "clients:\n  - { name: ci, key_hash: \"sha256:0000000000000000000000000000000000000000000000000000000000000000\", budget: { usd_per_day: 5.0 } }\nusage: { ledger: false }\n",
+            None,
+        )
+        .unwrap();
+        let _ = usage_ledger(&with_budget, &path, &mut err);
+        assert!(text(std::mem::take(&mut err)).contains("spend is forgotten on restart"),);
+
+        config.usage.ledger = true;
+        let (_, history) = usage_ledger(&config, &path, &mut err);
+        assert!(
+            history.is_empty() && err.is_empty(),
+            "a new ledger starts empty"
+        );
+        assert!(path.exists());
+
+        // A ledger that is a directory can be neither read nor appended to.
+        let (_, history) = usage_ledger(&config, &d, &mut err);
+        let t = text(err);
+        assert!(history.is_empty());
+        assert!(t.contains("cannot read the usage ledger"), "{t}");
+        assert!(t.contains("cannot open the usage ledger"), "{t}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    async fn otel_export_reports_headers_it_cannot_resolve() {
+        let config = crate::config::load::parse(
+            "otel:\n  endpoint: http://127.0.0.1:9\n  headers:\n    x-ok: { env: PRESENT }\n    x-missing: { env: ABSENT }\n",
+            None,
+        )
+        .unwrap();
+        let env = |n: &str| (n == "PRESENT").then(|| "v".to_owned());
+        let resolver = SystemResolver::new(&env);
+        let mut err = Vec::new();
+        let _ = with_otel(&Config::default(), Arc::new(NullSink), &resolver, &mut err);
+        assert!(err.is_empty(), "no otel block, no export, no output");
+
+        let _ = with_otel(&config, Arc::new(NullSink), &resolver, &mut err);
+        let t = text(err);
+        assert!(t.contains("exporting traces to http://127.0.0.1:9"), "{t}");
+        assert!(t.contains("otel header `x-missing` is not sent"), "{t}");
+        assert!(!t.contains("x-ok"), "{t}");
+        assert_eq!(config.otel.as_ref().unwrap().service_name, "airmate");
+        assert_eq!(config.otel.as_ref().unwrap().flush_secs, 5);
+    }
+}

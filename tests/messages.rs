@@ -434,6 +434,104 @@ async fn count_tokens_falls_back_to_the_estimate_when_the_upstream_answers_404()
     assert_eq!(mock.count(), 1, "the upstream was asked first");
 }
 
+fn count_body() -> Value {
+    json!({"model": "claude-x", "messages": [{"role": "user", "content": "twelve chars"}]})
+}
+
+#[tokio::test]
+async fn count_tokens_rejects_what_a_generation_would() {
+    let mock = Mock::start(|_| Reply::json(200, json!({"input_tokens": 1}))).await;
+    let yaml = yaml_for(
+        &mock.url(),
+        "anthropic",
+        "generic",
+        "",
+        "server:\n  max_body_bytes: 2000\n",
+    )
+    .replace("match: \"*\"", "match: \"claude-opus-*\"");
+    let gw = TestGateway::start_with_env(&yaml, &env_with_key("UP_KEY", UP_KEY)).await;
+
+    let r = gw
+        .request(
+            "POST",
+            "/v1/messages/count_tokens",
+            Some("not json".into()),
+            &[],
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+
+    let mut big = count_body();
+    big["model"] = json!("claude-opus-4");
+    big["messages"][0]["content"] = json!("x".repeat(5000));
+    let r = gw.post("/v1/messages/count_tokens", &big).await;
+    assert_eq!(r.status, 413, "{}", r.text());
+
+    // Claude's own family is never routed by upstream name, so an unmapped one has no route.
+    let mut other = count_body();
+    other["model"] = json!("claude-sonnet-unmapped");
+    let r = gw.post("/v1/messages/count_tokens", &other).await;
+    assert_eq!(r.status, 404, "{}", r.text());
+    assert_eq!(mock.count(), 0, "nothing reached the upstream");
+}
+
+#[tokio::test]
+async fn count_tokens_relays_an_upstream_failure_with_its_retry_hint() {
+    let mock = Mock::start(|_| {
+        Reply::json_with(
+            429,
+            json!({"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}),
+            &[("retry-after", "7")],
+        )
+    })
+    .await;
+    let gw = gateway(&mock, "anthropic", "generic").await;
+    let r = gw.post("/v1/messages/count_tokens", &count_body()).await;
+    assert_eq!(r.status, 429, "{}", r.text());
+    assert_eq!(r.header("retry-after"), Some("7"));
+    assert_eq!(r.json()["error"]["type"], "rate_limit_error");
+}
+
+#[tokio::test]
+async fn count_tokens_reports_an_upstream_that_is_down_or_cuts_the_reply_short() {
+    // Nothing listens on port 1.
+    let env = env_with_key("UP_KEY", UP_KEY);
+    let down = TestGateway::start_with_env(
+        &yaml_for("http://127.0.0.1:1", "anthropic", "generic", "", ""),
+        &env,
+    )
+    .await;
+    let r = down.post("/v1/messages/count_tokens", &count_body()).await;
+    assert!(r.status >= 500, "{} {}", r.status, r.text());
+
+    let mock = Mock::start(|_| Reply::Stream {
+        status: 200,
+        parts: vec![
+            support::Part::Bytes(b"{\"input_".to_vec()),
+            support::Part::Reset,
+        ],
+        headers: vec![("content-type".into(), "application/json".into())],
+    })
+    .await;
+    let gw = gateway(&mock, "anthropic", "generic").await;
+    let r = gw.post("/v1/messages/count_tokens", &count_body()).await;
+    assert!(r.status >= 500, "{} {}", r.status, r.text());
+}
+
+#[tokio::test]
+async fn count_tokens_rejects_a_body_it_cannot_estimate() {
+    let mock = Mock::start(|_| Reply::json(200, chat_ok("x"))).await;
+    let gw = gateway(&mock, "chat", "generic").await;
+    let r = gw
+        .post(
+            "/v1/messages/count_tokens",
+            &json!({"model": "claude-x", "messages": "not a list"}),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert_eq!(mock.count(), 0);
+}
+
 #[tokio::test]
 async fn models_lists_exact_entries_only() {
     let mock = Mock::start(|_| Reply::json(200, chat_ok("x"))).await;

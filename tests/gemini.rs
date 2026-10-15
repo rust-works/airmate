@@ -420,6 +420,57 @@ async fn gemini_count_tokens_is_an_estimate_in_either_body_shape() {
 }
 
 #[tokio::test]
+async fn gemini_count_tokens_rejects_bodies_it_cannot_read() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
+    let cfg = chat_yaml(&mock).replace(
+        "affinity: false\n",
+        "affinity: false\n  max_body_bytes: 500\n",
+    );
+    let g = TestGateway::start(&cfg).await;
+    let path = "/v1beta/models/gemini-2.5-pro:countTokens";
+
+    let big = json!({"contents": [{"parts": [{"text": "x".repeat(2000)}]}]});
+    assert_eq!(post_gemini(&g, path, &big).await.status, 413);
+
+    let r = g
+        .request(
+            "POST",
+            path,
+            Some("not json".into()),
+            &[("x-goog-api-key", &g.token)],
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+
+    // A wrapper that is not an object is read as the request itself, and is not one.
+    let r = post_gemini(&g, path, &json!({"generateContentRequest": 5})).await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert_eq!(mock.count(), 0);
+}
+
+#[tokio::test]
+async fn the_gemini_model_list_carries_the_token_limits_from_the_catalog() {
+    let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
+    let cfg = format!(
+        "{}catalog:\n  - {{ match: upstream-m, context_window: 100000, max_output_tokens: 4096 }}\n",
+        chat_yaml(&mock).replace("gemini-*", "gemini-2.5-pro")
+    );
+    let g = TestGateway::start(&cfg).await;
+    let list = g
+        .request(
+            "GET",
+            "/v1beta/models",
+            None,
+            &[("x-goog-api-key", &g.token)],
+        )
+        .await;
+    assert_eq!(list.status, 200, "{}", list.text());
+    let m = &list.json()["models"][0];
+    assert_eq!(m["inputTokenLimit"], 100_000);
+    assert_eq!(m["outputTokenLimit"], 4096);
+}
+
+#[tokio::test]
 async fn the_gemini_model_list_and_lookup_use_gemini_shapes() {
     let mock = Mock::start(|_| Reply::json(200, chat_reply("x"))).await;
     let cfg = chat_yaml(&mock).replace("gemini-*", "gemini-2.5-pro");
