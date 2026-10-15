@@ -34,6 +34,10 @@ impl Home {
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_STATE_HOME", self.0.join("state"))
             .env("PATH", std::env::var("PATH").unwrap_or_default());
+        // `env_clear` would drop the profile path cargo-llvm-cov sets, and the binary's coverage with it.
+        if let Some(p) = std::env::var_os("LLVM_PROFILE_FILE") {
+            c.env("LLVM_PROFILE_FILE", p);
+        }
         c
     }
 

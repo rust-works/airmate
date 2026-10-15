@@ -197,15 +197,16 @@ async fn the_command_exits_0_when_everything_passes_and_3_when_a_probe_fails() {
     std::fs::create_dir_all(&cfg_dir).unwrap();
     let run = |mock: &Mock, args: &[&str]| {
         std::fs::write(cfg_dir.join("airmate.yaml"), config(mock, "")).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_airmate"))
-            .env_clear()
+        let mut c = Command::new(env!("CARGO_BIN_EXE_airmate"));
+        c.env_clear()
             .env("HOME", &dir)
             .env("XDG_CONFIG_HOME", dir.join("config"))
-            .env("XDG_STATE_HOME", dir.join("state"))
-            .arg("doctor")
-            .args(args)
-            .output()
-            .unwrap()
+            .env("XDG_STATE_HOME", dir.join("state"));
+        // Keep the profile path cargo-llvm-cov sets, so the binary's coverage is recorded.
+        if let Some(p) = std::env::var_os("LLVM_PROFILE_FILE") {
+            c.env("LLVM_PROFILE_FILE", p);
+        }
+        c.arg("doctor").args(args).output().unwrap()
     };
     let good = good_upstream().await;
     let o = run(&good, &[]);
